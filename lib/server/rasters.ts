@@ -7,7 +7,7 @@ type Win = { lon0: number; lat0: number; dLon: number; dLat: number; w: number; 
 
 type Tiff = Awaited<ReturnType<typeof fromUrl>>;
 const tiffs = new Map<string, Promise<Tiff | null>>();
-const MAX_OPEN = 12; // кэшийн нийлбэр ≤360 МБ — cloud серверийн санах ойд багтана
+const MAX_OPEN = 4; // кэшийн нийлбэр ≤120 МБ — 512 МБ-ийн үнэгүй серверт багтана
 
 /** Тайл байхгүй бол null (S3 нь байхгүй түлхүүрт 403/404 буцаана); сүлжээний алдаа дээшээ шидэгдэнэ */
 function open(url: string) {

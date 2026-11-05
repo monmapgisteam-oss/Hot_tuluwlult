@@ -4,7 +4,7 @@ services:
     name: hot-tuluwlult
     runtime: docker
     region: singapore
-    plan: standard
+    plan: free # 15 минут хэрэглээгүй бол унтана, сэрэхэд ~1 минут
     branch: main
     healthCheckPath: /
     autoDeploy: true
