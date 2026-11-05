@@ -1,0 +1,13 @@
+# Render Blueprint: GitHub-ийн main салбарт өөрчлөлт орох бүрт автоматаар дахин байршуулна. HTTPS автомат.
+services:
+  - type: web
+    name: hot-tuluwlult
+    runtime: docker
+    region: singapore
+    plan: standard
+    branch: main
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: ARCGIS_PORTAL_URL
+        value: https://arcgis.ubhub.mn/arcgis

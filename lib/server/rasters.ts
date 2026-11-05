@@ -7,7 +7,7 @@ type Win = { lon0: number; lat0: number; dLon: number; dLat: number; w: number; 
 
 type Tiff = Awaited<ReturnType<typeof fromUrl>>;
 const tiffs = new Map<string, Promise<Tiff | null>>();
-const MAX_OPEN = 24;
+const MAX_OPEN = 12; // кэшийн нийлбэр ≤360 МБ — cloud серверийн санах ойд багтана
 
 /** Тайл байхгүй бол null (S3 нь байхгүй түлхүүрт 403/404 буцаана); сүлжээний алдаа дээшээ шидэгдэнэ */
 function open(url: string) {
@@ -18,7 +18,7 @@ function open(url: string) {
       if (head.status === 403 || head.status === 404) return null;
       if (!head.ok) throw new Error(`${url}: HTTP ${head.status}`);
       // Анхдагч кэш (100 × 64 КБ) том цонхонд блокуудыг дахин дахин татдаг
-      return fromUrl(url, { blockSize: 256 * 1024, cacheSize: 400 });
+      return fromUrl(url, { blockSize: 256 * 1024, cacheSize: 120 }); // нэг файлд ≤30 МБ
     })();
     t.catch(() => tiffs.delete(url));
     tiffs.set(url, t);
