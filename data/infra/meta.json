@@ -1,0 +1,12 @@
+{
+ "source": "https://download.geofabrik.de/asia/mongolia-latest.osm.pbf",
+ "license": "© OpenStreetMap contributors, ODbL",
+ "fileDate": "2026-11-05",
+ "ways": {
+  "road": 5402,
+  "rail": 2405,
+  "tl": 1045,
+  "river": 5328
+ },
+ "tiles": 244
+}
