@@ -2,9 +2,11 @@
 // Татах ажиллагаа хэдэн арван секунд үргэлжилж болох тул алхмыг шууд мэдээлнэ.
 import { AuthError, readToken, verify } from "@/lib/server/auth.ts";
 import { InputError, parseRings, prepare } from "@/lib/server/prepare.ts";
+import { loadAdmin } from "@/lib/server/vectors.ts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 export async function POST(req: Request) {
   try {
@@ -12,10 +14,18 @@ export async function POST(req: Request) {
   } catch (e) {
     return Response.json({ error: e instanceof AuthError ? e.message : "Нэвтрэлт шалгахад алдаа гарлаа." }, { status: 503 });
   }
-  let rings, cell: number | undefined;
+  let rings, cell: number | undefined, admin: { anchor: { name: string; lonLat: [number, number] } | null } | undefined;
   try {
     const body = await req.json();
-    rings = parseRings(body?.rings);
+    if (body?.admin) {
+      // Сонгосон сум, аймаг: хилийг сервер өөрөө уншина
+      const { aimag, soum } = body.admin;
+      if (typeof aimag !== "string" || (soum != null && typeof soum !== "string")) throw new InputError("Аймаг, сумын нэр буруу байна.");
+      const found = await loadAdmin(aimag, soum);
+      if (!found) throw new InputError("Сонгосон аймаг, сум олдсонгүй.");
+      rings = found.rings;
+      admin = { anchor: found.anchor };
+    } else rings = parseRings(body?.rings);
     cell = Number.isFinite(body?.cell) && body.cell > 0 ? body.cell : undefined;
   } catch (e) {
     const message = e instanceof InputError ? e.message : "Хүсэлт буруу байна.";
@@ -28,7 +38,7 @@ export async function POST(req: Request) {
     async start(c) {
       const send = (o: unknown) => { if (!gone) c.enqueue(enc.encode(`${JSON.stringify(o)}\n`)); };
       try {
-        const data = await prepare({ rings, cell }, (text) => send({ type: "step", text }));
+        const data = await prepare({ rings, cell, admin }, (text) => send({ type: "step", text }));
         send({ type: "result", data });
       } catch (e) {
         console.error("[prepare]", e);

@@ -5,8 +5,10 @@ import { sampleDem } from "@/lib/server/rasters.ts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
-const MAX_POINTS = 2_000_000;
+/** Vercel-ийн хариуны хязгаар 4.5 МБ: Float32 × 1 сая = 4 МБ */
+const MAX_POINTS = 1_000_000;
 
 export async function POST(req: Request) {
   try {

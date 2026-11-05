@@ -82,7 +82,10 @@ export async function planSettlement(o: { rings: XY[][]; prep: Prepared; inputs:
   if (!pieces.length) throw new Error("Энэ полигонд уул, гол, ойгоос зайтай тохиромжтой талбай олдсонгүй. Сум, аймгийн төвийн ойролцоох тэгш газар зурна уу.");
 
   // Өндрийн торыг полигоны хэмжээнд тааруулна: төлөвлөгчийн нүд бүрийн тооцоо Worker дээр явагдана
-  const demCell = Math.max(DEFAULT.demCell, Math.ceil(Math.sqrt((prep.areaHa * 1e4) / 80000) / 10) * 10);
+  const xs = zone.flat().map((p) => p[0]), ys = zone.flat().map((p) => p[1]);
+  const boxM2 = (Math.max(...xs) - Math.min(...xs) + 1000) * (Math.max(...ys) - Math.min(...ys) + 1000);
+  // Урт нарийн полигонд хүрээ нь том тул /api/dem-ийн 1 сая цэгийн хязгаарт багтаана
+  const demCell = Math.max(DEFAULT.demCell, Math.ceil(Math.sqrt((prep.areaHa * 1e4) / 80000) / 10) * 10, Math.ceil(Math.sqrt(boxM2 / 900000) / 10) * 10);
   let inp: Inputs = { ...DEFAULT, ...inputs, demCell };
   const notes: string[] = [];
   const anchor: XY | null = prep.anchor ? [prep.anchor.x, prep.anchor.y] : null;
@@ -105,5 +108,5 @@ export async function planSettlement(o: { rings: XY[][]; prep: Prepared; inputs:
   }
   const roads = (prep.roads ?? []) as Path[];
   const plan = await runPlan(zone, inp, { plant: anchor, sanitary: [], suitable: chosen.r, roads }, onStep);
-  return { ...plan, notes };
+  return { ...plan, notes, wkid: prep.epsg };
 }

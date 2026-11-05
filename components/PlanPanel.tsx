@@ -52,7 +52,7 @@ export default function PlanPanel({ hasPrep, inputs, onInputs, state, layers, on
     <div className="plan">
       <section>
         <h3>Төлөвлөлтийн тохиргоо</h3>
-        <p className="sectionHint">Суурьшлын хэмжээ, барилгын өндөр, гудамжны хэлбэрийг тохируулна.</p>
+        <p className="sectionHint">Зөвхөн тохиромжтой хэсэгт төлөвлөнө. Полигон зураагүй бол сум, аймгийн төвөөс 10 км-ийн хүрээнд.</p>
         <div className="form">
           <Num label="Хүн ам" unit="хүн" value={inputs.pop} onChange={(v) => set({ pop: Number(v) })} />
           <Num label="Орон сууцны давхар" unit="давхар" value={inputs.floorsRes} onChange={(v) => set({ floorsRes: Number(v) })} />
@@ -84,7 +84,7 @@ export default function PlanPanel({ hasPrep, inputs, onInputs, state, layers, on
             </div>
           </fieldset>
         </details>
-        {!hasPrep && !busy && <p className="muted">Эхлээд полигон зурж, «Тохиромжтой байдлын үнэлгээ»-г асаана уу.</p>}
+        {!hasPrep && !busy && <p className="muted">Эхлээд «Тохиромжтой байдлын үнэлгээ»-г асаана уу.</p>}
         {!valid && <p className="error inlineError" role="alert">Хүн ам, давхар, налуу 0-ээс их байх ёстой.</p>}
       </section>
 

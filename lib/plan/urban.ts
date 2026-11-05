@@ -106,6 +106,7 @@ export type Totals = {
 };
 export type Plan = {
   notes?: string[]; // байршил сонголтын тайлбар: төв, багасгасан хүн ам
+  wkid?: number; // төлөвлөгөөний UTM бүс
   suitability?:PlanningSuitabilitySummary;
   suitabilityReports?:Partial<Record<PlanningProfile,PlanningSuitabilitySummary>>;
   inp: Inputs; dem: Dem; zone: Rings; site: Rings; siteArea: number; steep: Rings; unsuit: Rings; center: XY; entry: XY | null; road: XY | null;

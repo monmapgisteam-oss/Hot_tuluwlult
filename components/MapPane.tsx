@@ -311,7 +311,7 @@ export default function MapPane({
     if (!plan) { flown.current = null; return; }
     void import("@/lib/plan/planLayers").then(({ buildPlanLayers }) => {
       if (!live) return;
-      const built = buildPlanLayers(plan, wkidRef.current, dim);
+      const built = buildPlanLayers(plan, plan.wkid ?? wkidRef.current, dim);
       const order: PlanLayerKey[] = ["ground", "zones", "streets", "storm", "water", "sewer", "heat", "power", "trees", "buildings", "site"];
       for (const k of order) for (const l of built.get(k) ?? []) {
         l.visible = planLayersRef.current[k];

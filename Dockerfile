@@ -4,7 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-RUN npm run build
+RUN BUILD_STANDALONE=1 npm run build
 
 FROM node:24-slim AS run
 WORKDIR /app

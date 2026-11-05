@@ -99,6 +99,28 @@ export async function loadSoums() {
   });
 }
 
+/** Сонгосон сум эсвэл аймгийн хил, төв (сум ба аймгийн файлд нэр зөрдөг тул кодоор холбоно). Олдохгүй бол null. */
+export async function loadAdmin(aimag: string, soum?: string | null) {
+  const soums = await loadGeojson("soum");
+  const ringsOf = (f: GeoFeature) => {
+    const c = f.geometry.coordinates as XY[][] | XY[][][];
+    return f.geometry.type === "MultiPolygon" ? (c as XY[][][]).flat() : (c as XY[][]);
+  };
+  if (soum) {
+    const f = soums.find((v) => v.properties.aimag_name === aimag && v.properties.soum_name === soum);
+    if (!f) return null;
+    const c = (await loadGeojson("soumcenter")).find((v) => v.properties.soum_code === f.properties.soum_code);
+    return { rings: ringsOf(f), anchor: c ? { name: String(c.properties.center_nam ?? soum), lonLat: c.geometry.coordinates as [number, number] } : null };
+  }
+  const member = soums.find((v) => v.properties.aimag_name === aimag);
+  if (!member) return null;
+  const code = member.properties.aimag_code;
+  const a = (await loadGeojson("aimag")).find((v) => v.properties.aimag_code === code);
+  if (!a) return null;
+  const c = (await loadGeojson("aimagcenter")).find((v) => v.properties.aimag_code === code);
+  return { rings: ringsOf(a), anchor: c ? { name: String(c.properties.center_nam ?? aimag), lonLat: c.geometry.coordinates as [number, number] } : null };
+}
+
 /** Сум, аймгийн төвүүд, lon/lat */
 export async function loadCenters(): Promise<{ name: string; lonLat: [number, number] }[]> {
   const [s, a] = await Promise.all([loadGeojson("soumcenter"), loadGeojson("aimagcenter")]);

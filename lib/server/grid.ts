@@ -229,7 +229,7 @@ export function ringArea(ring: XY[]) {
   return Math.abs(a) / 2;
 }
 
-const NICE_CELLS = [30, 50, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000];
+const NICE_CELLS = [30, 50, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000];
 export const MAX_CELLS = 25000, MAX_GRID = 1_200_000;
 export const paddingFor = (cell: number) => Math.max(5000, cell * 20);
 

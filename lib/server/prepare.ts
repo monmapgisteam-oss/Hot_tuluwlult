@@ -3,7 +3,7 @@
 import proj4 from "proj4";
 import { FACTORS, LANDCOVER, type Prepared, type SourceStatus, type ZoneInfo } from "../suit.ts";
 import {
-  MAX_CELLS, SegIndex, chooseCell, chooseFineCell, flowAccumulation, inPoly, medianInCell, paddingFor, ringArea, reliefAt, slopeAspect, toPoly, tpiAt,
+  MAX_CELLS, SegIndex, chooseCell, chooseFineCell, flowAccumulation, inPoly, medianInCell, paddingFor, reliefAt, slopeAspect, toPoly, tpiAt,
   type Poly, type Seg, type XY,
 } from "./grid.ts";
 import { sampleDem, sampleLandcover, type BBox } from "./rasters.ts";
@@ -13,6 +13,8 @@ import {
 } from "./vectors.ts";
 
 export const MAX_AREA_KM2 = 50000;
+/** Сонгосон аймаг, сум: хамгийн том аймаг ~165 мянган км² */
+const MAX_ADMIN_KM2 = 200000;
 const MAX_VERTICES = 5000;
 /** Дэд бүтцийн зайг хайх радиус, м — онооны муруйн төгсгөлөөс том */
 const INFRA_RADIUS = 20000;
@@ -56,18 +58,23 @@ const round = (a: ArrayLike<number>, d: number) => {
   return Array.from(a, (v) => (Number.isFinite(v) ? Math.round(v * f) / f : NaN));
 };
 
-export async function prepare(input: { rings: XY[][]; cell?: number }, step: (s: string) => void = () => {}): Promise<Prepared> {
+export async function prepare(input: { rings: XY[][]; cell?: number; admin?: { anchor: { name: string; lonLat: [number, number] } | null } }, step: (s: string) => void = () => {}): Promise<Prepared> {
   const lonLat = input.rings;
-  const outer = lonLat[0];
-  const lon0 = outer.reduce((s, p) => s + p[0], 0) / outer.length, lat0 = outer.reduce((s, p) => s + p[1], 0) / outer.length;
+  // Олон хэсэгтэй сум, аймагт бүх цагирагийн хүрээний төв
+  const allPts = lonLat.flat();
+  const lon0 = (Math.min(...allPts.map((p) => p[0])) + Math.max(...allPts.map((p) => p[0]))) / 2;
+  const lat0 = (Math.min(...allPts.map((p) => p[1])) + Math.max(...allPts.map((p) => p[1]))) / 2;
   // Монгол улс 45–51-р UTM бүсэд хуваагдана — полигоны төвийн бүсийг сонгож метрээр тооцно
   const utmZone = Math.max(1, Math.min(60, Math.floor((lon0 + 180) / 6) + 1));
   const epsg = (lat0 >= 0 ? 32600 : 32700) + utmZone;
   const tr = proj4(`+proj=utm +zone=${utmZone}${lat0 < 0 ? " +south" : ""} +datum=WGS84 +units=m +no_defs`);
   const rings = lonLat.map((r) => r.map((p) => tr.forward(p) as XY));
   const poly = toPoly(rings);
-  const areaM2 = Math.abs(ringArea(rings[0]) - rings.slice(1).reduce((s, r) => s + ringArea(r), 0));
-  if (areaM2 > MAX_AREA_KM2 * 1e6) throw new InputError(`Полигон хэт том: ${Math.round(areaM2 / 1e6).toLocaleString("en-US")} км² (дээд хязгаар ${MAX_AREA_KM2.toLocaleString("en-US")} км²).`);
+  // Нүх нь эсрэг чиглэлтэй тул тэмдэгтэй нийлбэр олон хэсэгтэй полигонд ч зөв
+  const signed = (r: XY[]) => r.reduce((s, p, i) => { const q = r[(i + 1) % r.length]; return s + p[0] * q[1] - q[0] * p[1]; }, 0) / 2;
+  const areaM2 = Math.abs(rings.reduce((s, r) => s + signed(r), 0));
+  const maxKm2 = input.admin ? MAX_ADMIN_KM2 : MAX_AREA_KM2;
+  if (areaM2 > maxKm2 * 1e6) throw new InputError(`Полигон хэт том: ${Math.round(areaM2 / 1e6).toLocaleString("en-US")} км² (дээд хязгаар ${maxKm2.toLocaleString("en-US")} км²).`);
   if (areaM2 < 1) throw new InputError("Полигоны талбай тэг байна.");
 
   const warnings: string[] = [];
@@ -236,6 +243,11 @@ export async function prepare(input: { rings: XY[][]; cell?: number }, step: (s:
     if (!anchor || km < anchor.km) anchor = { name: c.name, x: Math.round(a), y: Math.round(b), km: Math.round(km * 10) / 10 };
     return [a, b, a, b];
   });
+  // Сонгосон сум, аймагт төв нь тухайн нэгжийн өөрийн төв
+  if (input.admin?.anchor) {
+    const [a, b] = tr.forward(input.admin.anchor.lonLat);
+    anchor = { name: input.admin.anchor.name, x: Math.round(a), y: Math.round(b), km: Math.round((Math.hypot(a - cx, b - cy) / 1000) * 10) / 10 };
+  }
   const ci = new SegIndex(centerSegs, 10000);
   num.soum_center = round(Float64Array.from({ length: n }, (_, i) => Math.min(CENTER_RADIUS, ci.nearest(x[i], y[i], CENTER_RADIUS))), 0);
   sources.soum_center = { status: "loaded", source: "EIC · soumcenter, aimagcenter" };

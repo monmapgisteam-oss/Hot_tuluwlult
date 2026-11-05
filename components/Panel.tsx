@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import PlanPanel, { type PlanState } from "./PlanPanel";
+import type { Region } from "./SuitabilityApp";
 import type { PlanInputs } from "@/lib/plan/runSettlement";
 import type { PlanLayerKey } from "@/lib/plan/planLayers";
 import {
@@ -65,34 +66,31 @@ function useSoums() {
 
 const union = (list: BBox[]): BBox => list.reduce((a, b) => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])], [Infinity, Infinity, -Infinity, -Infinity] as BBox);
 
-function AdminSelect({ onZoom }: { onZoom: (b: BBox) => void }) {
+function AdminSelect({ region, onRegion }: { region: Region | null; onRegion: (r: Region | null, b: BBox | null) => void }) {
   const soums = useSoums();
-  const [aimag, setAimag] = useState("");
-  const [soum, setSoum] = useState("");
+  const aimag = region?.aimag ?? "";
   const aimags = useMemo(() => [...new Set(soums.map((s) => s.aimag))].sort((a, b) => a.localeCompare(b, "mn")), [soums]);
   const list = useMemo(() => soums.filter((s) => s.aimag === aimag).sort((a, b) => a.soum.localeCompare(b.soum, "mn")), [soums, aimag]);
+  const pickAimag = (name: string) => {
+    const sel = soums.filter((s) => s.aimag === name);
+    onRegion(name ? { aimag: name, soum: null } : null, sel.length ? union(sel.map((s) => s.bbox)) : null);
+  };
   return (
     <div className="adminRow">
       <label className="field">
         <span>Аймаг</span>
-        <select value={aimag} onChange={(e) => {
-          setAimag(e.target.value);
-          setSoum("");
-          const sel = soums.filter((s) => s.aimag === e.target.value);
-          if (sel.length) onZoom(union(sel.map((s) => s.bbox)));
-        }}>
-          <option value="">Бүх аймаг</option>
+        <select value={aimag} onChange={(e) => pickAimag(e.target.value)}>
+          <option value="">Сонгох</option>
           {aimags.map((a) => <option key={a} value={a}>{a}</option>)}
         </select>
       </label>
       <label className="field">
         <span>Сум</span>
-        <select disabled={!aimag} value={soum} onChange={(e) => {
-          setSoum(e.target.value);
+        <select disabled={!aimag} value={region?.soum ?? ""} onChange={(e) => {
           const s = list.find((v) => v.soum === e.target.value);
-          if (s) onZoom(s.bbox);
+          if (s) onRegion({ aimag, soum: s.soum }, s.bbox); else pickAimag(aimag);
         }}>
-          <option value="">{aimag ? `Сонгох (${list.length})` : "Аймаг сонгоно уу"}</option>
+          <option value="">{aimag ? `Бүх сум (${list.length})` : "Аймаг сонгоно уу"}</option>
           {list.map((s) => <option key={s.soum} value={s.soum}>{s.soum}</option>)}
         </select>
       </label>
@@ -313,9 +311,12 @@ export default function Panel(props: {
   drawing: boolean; busy: boolean; step: string | null; err: string | null; hasPolygon: boolean;
   prep: Prepared | null; res: Summary | null; eff: Factor[];
   levels: number[]; onLevels: (l: number[]) => void;
-  onDraw: () => void; onClear: () => void; onZoom: (b: BBox) => void;
+  onDraw: () => void; onClear: () => void;
+  region: Region | null; onRegion: (r: Region | null, b: BBox | null) => void;
 }) {
   const { drawing, busy, step, err, hasPolygon, prep, res, eff, levels } = props;
+  const hasTarget = hasPolygon || !!props.region;
+  const targetLabel = hasPolygon ? "Зурсан полигон" : props.region ? (props.region.soum ? `${props.region.soum} сум, ${props.region.aimag}` : `${props.region.aimag} аймаг`) : "";
   const [tab, setTab] = useState<Tab>("result");
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
   const validPlan = Number(props.planInputs.pop) > 0 && Number(props.planInputs.floorsRes) > 0 && Number(props.planInputs.maxSlope) > 0;
@@ -352,10 +353,10 @@ export default function Panel(props: {
             <h2><Icon name="pin" size={16} />Судалгааны талбай</h2>
             <span className={`areaStatus ${hasPolygon ? "areaReady" : ""}`}>{drawing ? "Зурж байна" : hasPolygon ? "Сонгосон" : "Сонгоогүй"}</span>
           </div>
-          <AdminSelect onZoom={props.onZoom} />
+          <AdminSelect region={props.region} onRegion={props.onRegion} />
 
           <div className="actions">
-            <button className={hasPolygon ? "outline" : "primary"} onClick={props.onDraw} disabled={drawing}>
+            <button className={hasTarget ? "outline" : "primary"} onClick={props.onDraw} disabled={drawing}>
               <Icon name="polygon" size={18} />{drawing ? "Зурж байна…" : hasPolygon ? "Шинэ полигон зурах" : "Полигон зурах"}
             </button>
             {(hasPolygon || drawing) && (
@@ -379,10 +380,10 @@ export default function Panel(props: {
         <div className="pane" role="tabpanel" id={`pane-${tab}`} aria-labelledby={`tab-${tab}`} tabIndex={0}>
           {tab === "result" && (
             <>
-              <label className={`switch stepSwitch ${hasPolygon && !drawing ? "" : "stepOff"}`} title={drawing ? "Талбайгаа зурж дуусгана уу" : hasPolygon ? "" : "Эхлээд полигон зурна уу"}>
-                <span className="switchCopy"><span id="assessment-label">Тохиромжтой байдлын үнэлгээ</span><small>{prep ? "Үр дүнгийн давхаргыг газрын зурагт харуулах" : "Асаахад сонгосон талбайг үнэлнэ"}</small></span>
-                <input type="checkbox" role="switch" aria-labelledby="assessment-label" disabled={!hasPolygon || drawing} checked={props.showResult} onChange={(e) => props.onShowResult(e.target.checked)} />
-              </label>
+              <label className={`switch stepSwitch ${hasTarget ? "" : "stepOff"}`} title={hasTarget ? "" : "Аймаг, сум сонгох эсвэл полигон зурна уу"}>
+              <span>Тохиромжтой байдлын үнэлгээ{targetLabel && <small>{targetLabel}</small>}</span>
+              <input type="checkbox" role="switch" disabled={!hasTarget} checked={props.showResult} onChange={(e) => props.onShowResult(e.target.checked)} />
+            </label>
               {busy && (
                 <div className="progress" role="status" aria-live="polite">
                   <p><span className="spinner" />{step}</p>
