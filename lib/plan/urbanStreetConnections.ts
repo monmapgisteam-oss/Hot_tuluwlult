@@ -1,5 +1,5 @@
 import {corridorGraph,type CorridorGraph} from './sharedUtilityGraph';
-import {area,bufPath,diff,dist,inter,nearest,pathLength,unionAll,type Rings,type XY} from './geom';
+import {area,bufPath,bufPoly,clipPaths,diff,dist,inter,nearest,pathLength,unionAll,type Rings,type XY} from './geom';
 import type {Dem} from './dem';
 import {terrainSegmentMaxGrade} from './terrainRoute';
 import type {Street,StreetCls} from './layout';
@@ -33,9 +33,22 @@ export function streetComponents(g:Pick<CorridorGraph,'nodes'|'edges'|'adj'>){
 /** Блок хуваалтын замын төгсгөлийг бодит геометрээр залгана.
  * Зөвхөн өмнө нь нөөцөлсөн замын зурвас дотор богино холбоос нэмнэ:
  * барилгын газрыг дайрах, холын тусдаа хороололд зохиомол зам үүсгэхгүй. */
+/** Тайрсны дараа үлдэх хэсгийн доод урт, м: үүнээс богино нь блокт үйлчлэхгүй */
+const MIN_TRIMMED_STREET=30;
+/** Хилийн дагуух гудамжийн өргөн хилээс бага зэрэг гардаг. Бүтнээр нь хасвал цаад блокууд замгүй үлдэж сүлжээ тасардаг тул
+ *  бүрэн өргөнөөрөө багтах хэсгийг нь үлдээнэ. Гол, туслах замыг тайрахгүй: тэнхлэгийг тасалбал сүлжээ задарна. */
+export function trimLocalStreets(input:Street[],boundary:Rings):Street[]{
+ let nextId=Math.max(20000,...input.map(s=>s.id))+1;
+ return input.flatMap(s=>{
+  if(s.ext||s.cls!=='local'||s.path.length<2||area(diff(bufPath([s.path],s.w/2),boundary))<=.01)return[s];
+  const parts=clipPaths([s.path],bufPoly(boundary,-(s.w/2+.05))).filter(p=>pathLength(p)>=MIN_TRIMMED_STREET);
+  return parts.map((path,i)=>({...s,id:i?nextId++:s.id,path}));
+ });
+}
+
 export function connectUrbanStreets(input:Street[],boundary:Rings,dem:Dem|null,localWidth:number,options:UrbanStreetOptions={}){
  // Keep the reserved source paths intact: zoning and later iterations may reuse them.
- const streets=input.filter(s=>s.ext||urbanStreetAllowed(s,boundary,dem,options)).map(s=>({...s,path:s.path.map(p=>[...p] as XY)})),internal=()=>streets.filter(s=>!s.ext),corridor=unionAll(internal().map(s=>bufPath([s.path],s.w/2+.05)));
+ const streets=trimLocalStreets(input,boundary).filter(s=>s.ext||urbanStreetAllowed(s,boundary,dem,options)).map(s=>({...s,path:s.path.map(p=>[...p] as XY)})),internal=()=>streets.filter(s=>!s.ext),corridor=unionAll(internal().map(s=>bufPath([s.path],s.w/2+.05)));
  const half=localWidth/2,maxGap=Math.max(localWidth,...input.map(s=>s.w))+8;
  let nextId=Math.max(10000,...input.map(s=>s.id))+1;
  for(let round=0;round<input.length;round++){
