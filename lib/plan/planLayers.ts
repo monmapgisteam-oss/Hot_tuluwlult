@@ -11,8 +11,11 @@ import { inter, setPlanWkid, bufPath, type Path, type Rings, type XY } from "./g
 import { SYS, type Sys } from "./network";
 import { urbanFacadeRenderer, urbanFacadeRows, urbanGroundRenderer, urbanGroundRows, urbanMarkRows, urbanMassRenderer, urbanTreeRenderer, urbanTreeRows } from "./urbanAppearance";
 import { channelPipes, PIPES } from "./utilityStrategy";
-import type { Plan } from "./urban";
+import type { PlanView } from "../savedPlan.ts";
 import { TREE, ZONE, type ZoneKey } from "./zoning";
+import { buildGerLayers } from "./gerLayers";
+import { buildSettlementRoadLayers } from "./settlementRoadLayers";
+import type { SettlementRoadDisplay } from "./settlementRoads";
 
 export type PlanDim = "2d" | "3d";
 export type PlanLayerKey = "site" | "ground" | "streets" | "buildings" | "trees" | "zones" | "water" | "sewer" | "heat" | "power" | "storm";
@@ -21,9 +24,9 @@ const BUILDING_LABEL: Record<string, string> = { res: "Орон сууц", com: 
 const SR = { wkid: 102100 };
 const rgba = (hex: string, a = 1) => { const n = parseInt(hex.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255, a]; };
 type Row = { g: unknown; tip?: string; a?: Record<string, unknown> };
-type Options = { renderer: unknown; fields?: { name: string; type: string }[]; minScale?: number; elevationInfo?: unknown };
+type Options = { renderer: unknown; fields?: { name: string; type: string }[]; minScale?: number; elevationInfo?: unknown; labelingInfo?: unknown };
 
-export function buildPlanLayers(pl: Plan, wkid: number, dim: PlanDim): Map<PlanLayerKey, FeatureLayer[]> {
+export function buildPlanLayers(pl: PlanView, wkid: number, dim: PlanDim, roadDisplay: SettlementRoadDisplay): Map<PlanLayerKey, FeatureLayer[]> {
   setPlanWkid(wkid); // төлөвлөгч Worker-т ажилладаг тул энд дахин тохируулна
   const tr = proj4(`+proj=utm +zone=${wkid % 100}${wkid >= 32700 ? " +south" : ""} +datum=WGS84 +units=m +no_defs`);
   const R = 6378137;
@@ -42,23 +45,23 @@ export function buildPlanLayers(pl: Plan, wkid: number, dim: PlanDim): Map<PlanL
     source: rows.map((r, i) => new Graphic({ geometry: r.g as never, attributes: { oid: i + 1, tip: r.tip ?? null, ...r.a } })),
     outFields: ["*"], popupEnabled: false, renderer: o.renderer as never, minScale: o.minScale ?? 0,
     ...(o.elevationInfo ? { elevationInfo: o.elevationInfo as never } : {}),
+    ...(o.labelingInfo ? { labelingInfo: o.labelingInfo as never } : {}),
   });
   const tipOf = (t: string, c: string, r: [string, string][]) => JSON.stringify({ t, c, r });
   const fill = (c: string, a: number, w = 0, oc?: string, oa = 1) => ({ type: "simple-fill", color: rgba(c, a), outline: { color: rgba(oc ?? c, oa), width: w } });
   const groundFields = [{ name: "k", type: "string" }, { name: "surface", type: "string" }, { name: "lot", type: "integer" }];
-  const groundLayer = (list: Plan["scene"]["base"]) => layer("polygon", urbanGroundRows(list).map((r) => ({ g: poly(r.g), a: r.a })), { renderer: urbanGroundRenderer(), fields: groundFields });
+  const groundLayer = (list: PlanView["scene"]["base"]) => layer("polygon", urbanGroundRows(list).map((r) => ({ g: poly(r.g), a: r.a })), { renderer: urbanGroundRenderer(), fields: groundFields });
   const on3d = dim === "3d";
   const out = new Map<PlanLayerKey, FeatureLayer[]>();
 
   out.set("site", [layer("polygon", [{ g: poly(pl.site) }], { renderer: { type: "simple", symbol: fill("#f97316", 0, 2, "#f97316") } })]);
   out.set("ground", [groundLayer(pl.scene.base), groundLayer(pl.scene.over)]);
 
-  // Зам: тооцсон гудамжны гадаргуу + гарц, зогсоолын будаг, эгнээний шугам
-  const roads = [groundLayer(pl.scene.streets)];
-  const marks = urbanMarkRows(pl.scene.marks);
+  // B01-ийн замын загвар: уулзвар, тусгаарлах зурвас, метрээр зурсан тасархай тэмдэглэгээ.
+  const roads = [groundLayer(roadDisplay.ground), ...buildSettlementRoadLayers(roadDisplay.view, wkid, dim, roadDisplay.paint)];
+  // Явган гарц, эгнээг замын загвар өөрөө зурна. Хуучин тэмдэглэгээнээс зөвхөн зогсоол үлдэнэ.
+  const marks = urbanMarkRows(pl.scene.marks.filter(m => m.k === "stall"));
   if (marks.length) roads.push(layer("polygon", marks.map((r) => ({ g: poly(r.g) })), { renderer: { type: "simple", symbol: fill("#f5f5f2", 1) }, minScale: 6000 }));
-  const lanes = pl.scene.lanes.map((l) => l.path).filter((p) => p.length > 1);
-  if (lanes.length) roads.push(layer("polyline", [{ g: line(lanes) }], { renderer: { type: "simple", symbol: { type: "simple-line", color: rgba("#f5f5f2", 0.9), width: 0.75 } }, minScale: 6000 }));
   // Улаан шугам: гудамжны хамрах хүрээ ба тайлбар
   const streetTips: Row[] = pl.streets.filter((s) => !s.ext).flatMap((s) => {
     const g = inter(bufPath([s.path], s.w / 2), pl.site);
@@ -70,13 +73,18 @@ export function buildPlanLayers(pl: Plan, wkid: number, dim: PlanDim): Map<PlanL
   if (streetTips.length) roads.push(layer("polygon", streetTips, { renderer: { type: "simple", symbol: { type: "simple-fill", color: [0, 0, 0, 0.01], outline: { width: 0 } } } }));
   out.set("streets", roads);
 
-  const buildingTip = (b: Plan["bldgs"][number]) => tipOf(BUILDING_LABEL[b.use] ?? b.use, "#c9a77e", [
+  const buildingTip = (b: PlanView["bldgs"][number]) => tipOf(BUILDING_LABEL[b.use] ?? b.use, "#c9a77e", [
     ["Давхар / өндөр", `${fmtN(b.floors)} · ${fmtN(b.h, 1)} м`], ["Суурь / нийт", `${fmtN(b.foot)} / ${fmtN(b.gfa)} м²`],
     ...(b.pop >= 1 ? [["Хүн ам", fmtN(b.pop)] as [string, string]] : []),
     ...(b.jobs >= 1 ? [["Ажлын байр", fmtN(b.jobs)] as [string, string]] : []),
     ...(b.waterM3 ? [["Ус", `${fmtN(b.waterM3, 1)} м³/хон`] as [string, string]] : []),
   ]);
-  if (on3d) {
+  if (pl.ger) {
+    const gerLayers = buildGerLayers(pl.ger, on3d, { layer, poly, line, point, lonLat: p => tr.inverse(p) });
+    out.get("ground")!.push(...gerLayers.ground);
+    out.set("buildings", gerLayers.buildings);
+    out.set("trees", gerLayers.trees);
+  } else if (on3d) {
     const tips = new Map(pl.bldgs.map((b) => [b.id, buildingTip(b)]));
     const elevation = { mode: "relative-to-ground", featureExpressionInfo: { expression: "$feature.z0" }, unit: "meters" };
     const masses = layer("polygon", pl.scene.masses.map((b) => ({ g: poly(b.rings), tip: tips.get(b.bid), a: { k: b.k, z0: b.z0, h: b.h } })), {
@@ -103,7 +111,7 @@ export function buildPlanLayers(pl: Plan, wkid: number, dim: PlanDim): Map<PlanL
     minScale: 8000,
     renderer: { type: "simple", symbol: { type: "point-3d", symbolLayers: [{ type: "object", resource: { primitive: "cylinder" }, width: 0.25, depth: 0.25, height: 7, anchor: "bottom", material: { color: "#4b5563" } }] } },
   }));
-  out.set("trees", trees);
+  out.set("trees", [...(out.get("trees") ?? []), ...trees]);
 
   const zoneKeys = Object.keys(ZONE) as ZoneKey[];
   out.set("zones", [layer("polygon", pl.zones.map((z) => ({

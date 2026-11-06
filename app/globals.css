@@ -31,6 +31,7 @@ h1, h2, h3, p, dl, dd, ol, ul { margin: 0; padding: 0; }
 .app { display: grid; grid-template-columns: 400px minmax(0, 1fr); height: 100dvh; }
 .stage { position: relative; min-width: 0; height: 100%; }
 .mapWrap, .map { position: absolute; inset: 0; }
+.mapPlanStatus { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); max-width: min(520px, 80%); padding: 10px 14px; border-radius: 8px; background: #fff; color: #334155; box-shadow: 0 2px 10px #0002; font-size: 13px; }
 
 /* ---------- Нэвтрэх хуудас ---------- */
 .login { min-height: 100dvh; display: grid; place-items: center; padding: 16px; background: #0b1b2b; }
@@ -57,7 +58,7 @@ h1, h2, h3, p, dl, dd, ol, ul { margin: 0; padding: 0; }
 .signOut { flex: none; display: inline-flex; align-items: center; gap: 5px; min-height: 36px; padding: 0 7px 0 4px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); color: var(--ink-3); cursor: pointer; }
 .signOut:hover { background: var(--sunken); color: var(--ink); }
 .signOut span { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 650; }
-.brand h1 { font-size: 19px; font-weight: 700; line-height: 1.3; letter-spacing: -0.025em; }
+.brand h1 { font-size: 15px; font-weight: 700; line-height: 1.3; letter-spacing: -0.025em; }
 .brand p { margin-top: 3px; color: var(--ink-3); font-size: 11.5px; }
 .controlHeading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .controlHeading h2 { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 650; }
@@ -135,17 +136,6 @@ select:disabled { background-color: var(--sunken); color: var(--ink-3); cursor: 
 .result h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 13px; font-weight: 600; margin-bottom: 10px; }
 .result h3 em { font-style: normal; font-weight: 400; font-size: 11.5px; color: var(--ink-3); }
 
-.result .verdict { background: color-mix(in srgb, var(--lv) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--lv) 25%, var(--surface)); padding: 18px 16px; }
-.verdictTop { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.badge { flex: none; display: grid; place-items: center; width: 54px; height: 54px; border-radius: 12px; font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.eyebrow { display: block; font-size: 11.5px; font-weight: 500; color: var(--ink-2); }
-.verdict h2 { margin: 3px 0; font-size: 20px; font-weight: 700; line-height: 1.2; letter-spacing: -0.01em; }
-.verdict p { color: var(--ink-2); font-size: 12.5px; }
-.verdict p b { color: var(--ink); font-weight: 600; }
-.stack { display: flex; gap: 2px; height: 10px; overflow: hidden; border-radius: 4px; }
-.stack i { display: block; flex-basis: 0; min-width: 2px; }
-.place { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
-.place .icon { color: var(--ink-3); }
 
 .kpis { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin: 12px 16px; }
 .kpis > div { position: relative; min-width: 0; background: var(--surface); padding: 13px; border: 1px solid var(--line); border-radius: 10px; }
@@ -196,8 +186,6 @@ select:disabled { background-color: var(--sunken); color: var(--ink-3); cursor: 
 .st i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .st-loaded i { background: var(--ok); }
 .st-partial i { background: #d99a1c; }
-.st-missing { color: var(--ink-3); }
-.st-missing i { background: var(--line-strong); }
 
 /* ---------- Форм ---------- */
 .switch { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; cursor: pointer; }
@@ -275,7 +263,7 @@ select:disabled { background-color: var(--sunken); color: var(--ink-3); cursor: 
 @media (max-width: 380px) {
   .brand, .control { padding-left: 16px; padding-right: 16px; }
   .brand { gap: 9px; }
-  .brand h1 { font-size: 17px; }
+  .brand h1 { font-size: 14px; }
   .brand p { font-size: 10.5px; }
   .logo { width: 36px; height: 40px; }
   .result section, .plan section { padding: 12px; margin: 12px; }
@@ -288,3 +276,46 @@ select:disabled { background-color: var(--sunken); color: var(--ink-3); cursor: 
   .panel *, .panel *::before, .panel *::after { transition: none; }
 }
 .stepSwitch small { display: block; margin-top: 1px; font-size: 12px; font-weight: 400; color: var(--ink-3); }
+
+/* ---------- Хадгалсан загвар ---------- */
+.savedForm { display: flex; gap: 8px; }
+.savedForm input { flex: 1; min-width: 0; height: 38px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 13px; }
+.savedForm button { flex: none; height: 38px; padding: 0 12px; border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; }
+.savedList { display: grid; gap: 8px; max-height: 220px; margin: 10px 0 0; padding: 0 0 2px; overflow-y: auto; list-style: none; }
+.savedList li { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+.savedList li + li { padding-top: 8px; border-top: 1px solid var(--line); }
+.savedList div { min-width: 0; }
+.savedList b { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.savedList small { display: block; margin-top: 1px; font-size: 11.5px; color: var(--ink-3); }
+.savedList button { flex: none; margin: 0; }
+.savedList button:disabled { color: var(--ink-3); cursor: default; text-decoration: none; }
+
+/* ---------- Лавлах давхарга (газрын зураг) ---------- */
+.refLayers { display: grid; gap: 10px; min-width: 226px; padding: 12px 14px; background: var(--surface); color: var(--ink); font-size: 13px; }
+.refLayers h3 { font-size: 13px; font-weight: 600; }
+.refLayers label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.refLayers input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.refLayers i { flex: none; width: 12px; height: 12px; border-radius: 3px; }
+
+/* ---------- Стандарт ---------- */
+.standards { padding-bottom: 8px; }
+.stdIntro { margin: 16px 16px 0; color: var(--ink-2); font-size: 12px; line-height: 1.5; }
+.stdGroup { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 18px 16px -6px; font-size: 13px; font-weight: 650; }
+.stdGroup small { font-size: 11px; font-weight: 400; color: var(--ink-3); }
+.plan .stdDoc h3 { margin-bottom: 2px; }
+.stdDoc h3 a { color: var(--accent); text-decoration: none; }
+.stdDoc h3 a:hover { text-decoration: underline; text-underline-offset: 2px; }
+.stdTitle { color: var(--ink-2); font-size: 12px; line-height: 1.4; }
+.stdNote { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-ink); font-size: 11.5px; line-height: 1.4; }
+.stdRows { display: grid; gap: 9px; margin-top: 10px; }
+.stdRow { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; font-size: 12px; line-height: 1.4; }
+.stdRow + .stdRow { padding-top: 9px; border-top: 1px solid var(--line); }
+.stdRow > div { min-width: 0; }
+.stdRow b { font-weight: 600; }
+.stdRow small { display: block; margin-top: 2px; color: var(--ink-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.stdStatus { flex: none; max-width: 92px; padding: 2px 6px; border-radius: 5px; font-size: 10.5px; font-style: normal; font-weight: 600; line-height: 1.3; text-align: center; background: var(--sunken); color: var(--ink-3); }
+.std-met, .std-enforced { background: #e6f4ec; color: var(--ok); }
+.std-gap { background: var(--err-bg); color: var(--err-ink); }
+.std-partial { background: var(--warn-bg); color: var(--warn-ink); }
+.stdList { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; color: var(--ink-2); font-size: 12px; line-height: 1.4; }
+.stdList b { display: block; color: var(--ink); font-weight: 600; }

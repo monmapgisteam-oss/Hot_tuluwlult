@@ -207,6 +207,20 @@ export function toPoly(rings: XY[][]): Poly {
   return { rings, xmin, ymin, xmax, ymax };
 }
 
+/** Тор дээрх нүдний төв аль нэг полигон дотор байвал 1. Полигон бүрт зөвхөн хүрээнийх нь нүдийг шалгана. cellOf: торын индекс → нүд, -1 = полигонд ороогүй. */
+export function maskCells(polys: Poly[], g: { x0: number; y0: number; cell: number; nx: number; ny: number }, cellOf: Int32Array, n: number) {
+  const out = new Uint8Array(n);
+  for (const p of polys) {
+    const i0 = Math.max(0, Math.floor((p.xmin - g.x0) / g.cell)), i1 = Math.min(g.nx - 1, Math.floor((p.xmax - g.x0) / g.cell));
+    const j0 = Math.max(0, Math.floor((p.ymin - g.y0) / g.cell)), j1 = Math.min(g.ny - 1, Math.floor((p.ymax - g.y0) / g.cell));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const c = cellOf[j * g.nx + i];
+      if (c >= 0 && !out[c] && inPoly(g.x0 + (i + 0.5) * g.cell, g.y0 + (j + 0.5) * g.cell, p)) out[c] = 1;
+    }
+  }
+  return out;
+}
+
 /** Олон цагирагтай полигон (нүх орсон) — even-odd дүрэм */
 export function inPoly(x: number, y: number, p: Poly) {
   if (x < p.xmin || x > p.xmax || y < p.ymin || y > p.ymax) return false;

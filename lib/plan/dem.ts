@@ -14,7 +14,12 @@ export function loadDem(b: { x0: number; y0: number; x1: number; y1: number }, c
     const pr = (async () => {
       const r = await fetch("/api/dem", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ wkid, x0, y0, nx, ny, cell }) });
       if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `Өндөр уншигдсангүй (${r.status}).`);
-      const z = Float64Array.from(new Float32Array(await r.arrayBuffer()));
+      const buffer = await r.arrayBuffer();
+      const expectedBytes = nx * ny * Float32Array.BYTES_PER_ELEMENT;
+      if (buffer.byteLength !== expectedBytes) {
+        throw new Error(`DEM өгөгдлийн хэмжээ буруу: ${buffer.byteLength}/${expectedBytes} байт.`);
+      }
+      const z = Float64Array.from(new Float32Array(buffer));
       // Өндөр дутуу бол 0/хөрш утгаар зохиомлоор нөхөхгүй.
       const missing = z.reduce((s, v) => s + (!Number.isFinite(v) ? 1 : 0), 0);
       if (missing) throw new Error(`DEM өндөр дутуу: ${missing}/${z.length} цэг.`);

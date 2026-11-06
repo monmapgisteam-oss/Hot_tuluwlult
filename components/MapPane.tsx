@@ -12,6 +12,7 @@ import { geographicToWebMercator, webMercatorToGeographic } from "@arcgis/core/g
 import FeatureLayer from "@arcgis/core/layers/FeatureLayer";
 import GeoJSONLayer from "@arcgis/core/layers/GeoJSONLayer";
 import GraphicsLayer from "@arcgis/core/layers/GraphicsLayer";
+import GroupLayer from "@arcgis/core/layers/GroupLayer";
 import Ground from "@arcgis/core/Ground";
 import ElevationLayer from "@arcgis/core/layers/ElevationLayer";
 import MapView from "@arcgis/core/views/MapView";
@@ -22,14 +23,19 @@ import Expand from "@arcgis/core/widgets/Expand";
 import ScaleBar from "@arcgis/core/widgets/ScaleBar";
 import SketchViewModel from "@arcgis/core/widgets/Sketch/SketchViewModel";
 import Zoom from "@arcgis/core/widgets/Zoom";
-import proj4 from "proj4";
-import type { Plan } from "@/lib/plan/urban";
+import { toPlanView, type PlanView } from "@/lib/savedPlan.ts";
 import type { PlanDim, PlanLayerKey } from "@/lib/plan/planLayers";
+import type { SettlementRoadDisplay } from "@/lib/plan/settlementRoads";
+import type { RoadDisplayResponse } from "@/lib/plan/roadDisplay.worker";
+import { GOVI_LAYER, GOVI_URL, LAKE_WHERE } from "@/lib/govi.ts";
 import { LEVELS, aspectDir, FLAT_SLOPE, catName, FACTORS, fmtN, type Prepared, type Summary } from "@/lib/suit.ts";
+import { resultGeometry } from "@/lib/suitGeometry.ts";
 
 export type MapHandle = {
   startDraw(): void;
   clearDraw(): void;
+  /** Хадгалсан полигоныг шинжилгээ эхлүүлэлгүй газрын зураг дээр харуулна */
+  showPolygon(rings: [number, number][][]): void;
   zoomTo(b: [number, number, number, number]): void;
 };
 type LonLatRings = [number, number][][];
@@ -57,20 +63,44 @@ const boundaryRenderer = (dark: boolean, kind: "aimag" | "soum") => ({
   },
 });
 const dataUrl = (name: string) => new URL(`/data/${name}.geojson`, window.location.href).href;
-const merc = (lon: number, lat: number): [number, number] => {
-  const R = 6378137;
-  return [(R * lon * Math.PI) / 180, R * Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360))];
-};
 
-/** UTM нүднүүдийн булангуудыг Web Mercator руу хөрвүүлнэ */
-function cellRings(p: Prepared) {
-  const tr = proj4(`+proj=utm +zone=${p.utmZone}${p.epsg >= 32700 ? " +south" : ""} +datum=WGS84 +units=m +no_defs`);
-  const h = p.cell / 2;
-  const toM = (x: number, y: number) => { const [a, b] = tr.inverse([x, y]); return merc(a, b); };
-  return Array.from({ length: p.n }, (_, i) => {
-    const x = p.x[i], y = p.y[i];
-    return [toM(x - h, y - h), toM(x - h, y + h), toM(x + h, y + h), toM(x + h, y - h), toM(x - h, y - h)];
+/** Асааж унтраадаг лавлах давхаргууд — анхдагчаар унтраалттай */
+type RefLayer = { title: string; color: string; layer: FeatureLayer };
+const area = (fill: number[], line: number[], width: number) => ({ type: "simple", symbol: { type: "simple-fill", color: fill, outline: { color: line, width } } });
+function referenceLayers(): RefLayer[] {
+  const make = (title: string, color: string, id: number, o: ConstructorParameters<typeof FeatureLayer>[0]): RefLayer => ({
+    title, color, layer: new FeatureLayer({ url: `${GOVI_URL}/${id}`, title, visible: false, popupEnabled: false, ...o }),
   });
+  return [
+    make("Тусгай хамгаалалттай газар", "#16a34a", GOVI_LAYER.protected, {
+      outFields: ["placenamem"], renderer: area([22, 163, 74, 0.22], [21, 128, 61, 1], 1.2) as never,
+      labelingInfo: [{
+        labelExpressionInfo: { expression: "$feature.placenamem" }, minScale: 6000000,
+        symbol: { type: "text", color: "#ffffff", haloColor: "#14532d", haloSize: 0.75, font: { size: 8.5 } },
+      }] as never,
+    }),
+    make("Нуур", "#2563eb", GOVI_LAYER.lake, { definitionExpression: LAKE_WHERE, renderer: area([37, 99, 235, 0.4], [29, 78, 216, 1], 0.8) as never }),
+    make("Газар тариалан", "#eab308", GOVI_LAYER.cropland, { renderer: area([234, 179, 8, 0.4], [161, 98, 7, 1], 0.6) as never }),
+    make("Гол", "#38bdf8", GOVI_LAYER.river, { renderer: { type: "simple", symbol: { type: "simple-line", color: [56, 189, 248, 1], width: 1.6 } } as never }),
+  ];
+}
+function referencePanel(items: RefLayer[]) {
+  const root = document.createElement("div");
+  root.className = "refLayers";
+  const head = document.createElement("h3");
+  head.textContent = "Давхарга";
+  root.append(head);
+  for (const { title, color, layer } of items) {
+    const row = document.createElement("label"), box = document.createElement("input"), chip = document.createElement("i"), name = document.createElement("span");
+    box.type = "checkbox";
+    box.checked = layer.visible;
+    box.onchange = () => { layer.visible = box.checked; };
+    chip.style.background = color;
+    name.textContent = title;
+    row.append(box, chip, name);
+    root.append(row);
+  }
+  return root;
 }
 
 export default function MapPane({
@@ -78,7 +108,7 @@ export default function MapPane({
 }: {
   dim: PlanDim;
   visible: boolean;
-  plan: Plan | null;
+  plan: PlanView | null;
   planLayers: Record<PlanLayerKey, boolean>;
   ref: Ref<MapHandle>;
   prep: Prepared | null;
@@ -89,7 +119,7 @@ export default function MapPane({
   onDrawing: (on: boolean) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
-  const world = useRef<{ map: EsriMap; sketch: GraphicsLayer; under: GeoJSONLayer; aimag: GeoJSONLayer; soum: GeoJSONLayer; basemaps: { basemap: Basemap; dark: boolean }[] } | null>(null);
+  const world = useRef<{ map: EsriMap; sketch: GraphicsLayer; under: GeoJSONLayer; aimag: GeoJSONLayer; soum: GeoJSONLayer; basemaps: { basemap: Basemap; dark: boolean }[]; reference: RefLayer[] } | null>(null);
   const stage = useRef<{ map: EsriMap; view: MapView | SceneView; sketch: GraphicsLayer; svm: SketchViewModel; under: GeoJSONLayer } | null>(null);
   const camera = useRef<Extent | null>(null);
   const planRefs = useRef<Map<PlanLayerKey, FeatureLayer[]>>(new Map());
@@ -98,11 +128,45 @@ export default function MapPane({
   if (prep) wkidRef.current = prep.epsg;
   planLayersRef.current = planLayers;
   const resultLayer = useRef<FeatureLayer | null>(null);
+  const resultGroup = useRef<GroupLayer | null>(null);
+  const resultMask = useRef<GraphicsLayer | null>(null);
+  const display = useRef({ levels, opacity, visible, dim });
+  display.current = { levels, opacity, visible, dim };
   const [tip, setTip] = useState<{ x: number; y: number; i?: number; plan?: { t: string; c: string; r: [string, string][] } } | null>(null);
   const cb = useRef({ onPolygon, onDrawing });
   cb.current = { onPolygon, onDrawing };
   const last = useRef("");
-  const flown = useRef<Plan | null>(null);
+  const flown = useRef<PlanView | null>(null);
+  const [roadDisplay, setRoadDisplay] = useState<{ plan: PlanView; data: SettlementRoadDisplay } | null>(null);
+  const [roadError, setRoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRoadDisplay(null);
+    setRoadError(null);
+    if (!plan) return;
+    let worker: Worker | null = null;
+    let live = true;
+    const fail = (message: string) => {
+      if (live) setRoadError(`Замын дүрслэлийг бэлтгэж чадсангүй: ${message}`);
+      worker?.terminate();
+    };
+    try {
+      worker = new Worker(new URL("../lib/plan/roadDisplay.worker.ts", import.meta.url), { type: "module" });
+      worker.onmessage = (event: MessageEvent<RoadDisplayResponse>) => {
+        if (!live) return;
+        if (event.data.type === "error") { fail(event.data.message); return; }
+        setRoadDisplay({ plan, data: event.data.display });
+        worker?.terminate();
+      };
+      worker.onerror = (event) => { event.preventDefault(); fail(event.message || "Дахин нээнэ үү."); };
+      worker.onmessageerror = () => fail("Замын өгөгдлийг уншиж чадсангүй.");
+      const view = toPlanView({ ...plan, wkid: plan.wkid ?? wkidRef.current });
+      worker.postMessage({ wkid: view.wkid, site: view.site, streets: view.streets, streetInputs: view.streetInputs, scene: { streets: view.scene.streets, accesses: view.scene.accesses } });
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
+    return () => { live = false; worker?.terminate(); };
+  }, [plan]);
 
   useEffect(() => {
     const aimag = new GeoJSONLayer({
@@ -135,11 +199,13 @@ export default function MapPane({
       m.load().then(() => { m.title = b.title; }).catch(() => {});
       return [{ ...b, basemap: m }];
     });
+    const reference = referenceLayers();
     const map = new EsriMap({
-      basemap: basemaps[0].basemap, layers: [soum, aimag, centers, sketch],
+      // Лавлах давхаргууд төлөвлөгөө, хилийн доор
+      basemap: basemaps[0].basemap, layers: [...reference.map((r) => r.layer), soum, aimag, centers, sketch],
       ground: new Ground({ layers: [new ElevationLayer({ url: ELEVATION_URL })] }), // зөвхөн 3D-д нөлөөлнө
     });
-    world.current = { map, sketch, under: soum, aimag, soum, basemaps };
+    world.current = { map, sketch, under: soum, aimag, soum, basemaps, reference };
     camera.current = geographicToWebMercator(new Extent({ xmin: 87, ymin: 41, xmax: 120.5, ymax: 52.5, spatialReference: { wkid: 4326 } })) as Extent;
     return () => { world.current = null; map.destroy(); };
   }, []);
@@ -148,7 +214,7 @@ export default function MapPane({
   useEffect(() => {
     const w = world.current;
     if (!box.current || !w) return;
-    const { map, sketch, aimag, soum, basemaps } = w;
+    const { map, sketch, aimag, soum, basemaps, reference } = w;
     const view: MapView | SceneView = dim === "3d"
       ? new SceneView({
         container: box.current, map, popupEnabled: false, viewingMode: "global", ui: { components: ["attribution"] },
@@ -161,12 +227,15 @@ export default function MapPane({
         constraints: { rotationEnabled: false, snapToZoom: false }, ui: { components: ["attribution"] },
       });
     if (dim === "3d" && camera.current) {
-      const target = planRefs.current.get("site")?.[0]?.source?.getItemAt(0)?.geometry?.extent?.clone().expand(1.25) ?? camera.current;
-      view.when(() => (view as SceneView).goTo({ target, tilt: 58 }, { animate: false })).catch(() => {});
+      view.when(() => {
+        const target = planRefs.current.get("site")?.[0]?.source?.getItemAt(0)?.geometry?.extent?.clone().expand(1.25) ?? camera.current;
+        return (view as SceneView).goTo({ target, tilt: 58 }, { animate: false });
+      }).catch(() => {});
     }
     view.ui.add(new Zoom({ view }), "top-right");
     const gallery = new BasemapGallery({ view, source: new LocalBasemapsSource({ basemaps: basemaps.map((b) => b.basemap) }) });
-    view.ui.add(new Expand({ view, content: gallery, expandTooltip: "Суурь зураг", collapseTooltip: "Хаах", expandIcon: "basemap" }), "top-right");
+    view.ui.add(new Expand({ view, content: gallery, expandTooltip: "Суурь зураг", collapseTooltip: "Хаах", expandIcon: "basemap", group: "map-tools" }), "top-right");
+    view.ui.add(new Expand({ view, content: referencePanel(reference), expandTooltip: "Давхарга", collapseTooltip: "Хаах", expandIcon: "layers", group: "map-tools" }), "top-right");
     // Суурь зураг солигдоход хилийн өнгийг тааруулна
     const basemapWatch = reactiveUtils.watch(() => map.basemap, (current) => {
       const dark = basemaps.find((b) => b.basemap === current)?.dark ?? true;
@@ -244,14 +313,28 @@ export default function MapPane({
       cb.current.onDrawing(false);
       cb.current.onPolygon(null);
     },
+    showPolygon(rings) {
+      const s = stage.current;
+      if (!s) return;
+      s.sketch.removeAll();
+      s.sketch.add(new Graphic({
+        geometry: geographicToWebMercator(new Polygon({ rings, spatialReference: { wkid: 4326 } })) as Polygon,
+        symbol: s.svm.polygonSymbol,
+      }));
+      last.current = JSON.stringify(rings);
+    },
     zoomTo([w, s, e, n]) {
       const ext = geographicToWebMercator(new Extent({ xmin: w, ymin: s, xmax: e, ymax: n, spatialReference: { wkid: 4326 } }));
-      stage.current?.view.goTo((ext as Extent).clone().expand(1.15), { duration: 700 }).catch(() => {});
+      const current = stage.current;
+      if (!current) return;
+      current.view.when().then(() => {
+        if (stage.current === current) return current.view.goTo((ext as Extent).clone().expand(1.15), { duration: 700 });
+      }).catch(() => {});
     },
   }), []);
 
   // Полигон шинэчлэгдэхэд геометрийг нэг л удаа тооцно
-  const rings = useMemo(() => (prep ? cellRings(prep) : null), [prep]);
+  const geometry = useMemo(() => (prep ? resultGeometry(prep) : null), [prep]);
 
   // Үр дүнгийн давхарга — жин, хориг өөрчлөгдөхөд шинэчилнэ
   useEffect(() => {
@@ -261,23 +344,28 @@ export default function MapPane({
       const old = s.map.findLayerById(RESULT_ID);
       if (old) { s.map.remove(old); old.destroy(); }
       resultLayer.current = null;
+      resultGroup.current = null;
+      resultMask.current = null;
     };
-    if (!prep || !res || !rings) { drop(); setTip(null); return; }
+    if (!prep || !res || !geometry) { drop(); setTip(null); return; }
     const t = setTimeout(() => {
+      const { levels, opacity, visible, dim } = display.current;
       const source: Graphic[] = [];
       for (let i = 0; i < prep.n; i++) {
         const level = res.cells[i].level;
-        if (!level) continue;
+        const cell = geometry.cells[i];
+        if (!level || !cell) continue;
         source.push(new Graphic({
-          geometry: new Polygon({ rings: [rings[i]], spatialReference: { wkid: 102100 } }),
+          geometry: cell,
           attributes: { oid: i + 1, i, level },
         }));
       }
       drop();
       const layer = new FeatureLayer({
-        id: RESULT_ID, title: "Тохиромж", geometryType: "polygon", spatialReference: { wkid: 102100 }, objectIdField: "oid",
+        id: `${RESULT_ID}-cells`, title: "Тохиромж", geometryType: "polygon", spatialReference: { wkid: 102100 }, objectIdField: "oid",
         fields: [{ name: "oid", type: "oid" }, { name: "i", type: "integer" }, { name: "level", type: "integer" }] as never,
-        source, outFields: ["*"], popupEnabled: false, opacity, visible,
+        source, outFields: ["*"], popupEnabled: false, visible,
+        effect: dim === "2d" && geometry.boundary ? "blur(1px)" : null,
         copyright: "Copernicus DEM · ESA WorldCover · © OpenStreetMap contributors · EIC",
         definitionExpression: levels.length === 5 ? "1=1" : levels.length ? `level IN (${levels.join(",")})` : "1=0",
         renderer: {
@@ -285,13 +373,33 @@ export default function MapPane({
           uniqueValueInfos: LEVELS.map((l) => ({ value: l.n, label: `${l.n} · ${l.label}`, symbol: { type: "simple-fill", color: l.color, outline: { width: 0 } } })),
         } as never,
       });
-      s.map.add(layer, 0); // хил, зурсан полигон дээр нь харагдана
+      // Зөөлрүүлэлтийн дараа хилээр маск тавина — өнгө polygon-ы гадна тархахгүй.
+      // GroupLayer нь зөвхөн үр дүнг масклана; суурь зураг, бусад давхаргад нөлөөлөхгүй.
+      const mask = geometry.boundary ? new GraphicsLayer({
+        title: "Үнэлгээний хил", blendMode: "destination-in", visible: dim === "2d", listMode: "hide",
+        graphics: [new Graphic({
+          geometry: geometry.boundary,
+          symbol: { type: "simple-fill", color: [255, 255, 255, 1], outline: { width: 0 } },
+        })],
+      }) : null;
+      const group = new GroupLayer({
+        id: RESULT_ID, title: "Тохиромж", layers: mask ? [layer, mask] : [layer], opacity, visible,
+      });
+      s.map.add(group, 0); // хил, зурсан полигон дээр нь харагдана
       resultLayer.current = layer;
+      resultGroup.current = group;
+      resultMask.current = mask;
     }, 150);
     return () => clearTimeout(t);
     // levels, opacity-г давхаргыг дахин үүсгэхгүйгээр доорх effect-ээр хэрэглэнэ
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prep, res, rings]);
+  }, [prep, res, geometry]);
+
+  // SceneView нь blur/mask дэмжихгүй; геометрээр тасалсан нүднүүдийг хэвээр харуулна.
+  useEffect(() => {
+    if (resultMask.current) resultMask.current.visible = dim === "2d";
+    if (resultLayer.current) resultLayer.current.effect = dim === "2d" && resultMask.current ? "blur(1px)" as never : null;
+  }, [dim]);
 
   useEffect(() => {
     const l = resultLayer.current;
@@ -309,9 +417,10 @@ export default function MapPane({
     clear();
     setTip(null);
     if (!plan) { flown.current = null; return; }
-    void import("@/lib/plan/planLayers").then(({ buildPlanLayers }) => {
+    if (roadDisplay?.plan !== plan) return;
+    void import("@/lib/plan/planLayers").then(async ({ buildPlanLayers }) => {
       if (!live) return;
-      const built = buildPlanLayers(plan, plan.wkid ?? wkidRef.current, dim);
+      const built = buildPlanLayers(plan, plan.wkid ?? wkidRef.current, dim, roadDisplay.data);
       const order: PlanLayerKey[] = ["ground", "zones", "streets", "storm", "water", "sewer", "heat", "power", "trees", "buildings", "site"];
       for (const k of order) for (const l of built.get(k) ?? []) {
         l.visible = planLayersRef.current[k];
@@ -320,26 +429,31 @@ export default function MapPane({
       planRefs.current = built;
       // Шинэ төлөвлөгөө дээр нэг удаа ойртоно; 2D/3D солиход камер хэвээр
       if (flown.current === plan) return;
-      flown.current = plan;
       const site = built.get("site")?.[0]?.source?.getItemAt(0)?.geometry?.extent?.clone().expand(1.25);
-      if (site) (s.view as MapView).goTo(dim === "3d" ? ({ target: site, tilt: 58 } as never) : site, { duration: 900 }).catch(() => {});
-    }).catch((e) => console.error("[plan layers]", e));
+      if (!site) return;
+      await s.view.when();
+      if (!live || stage.current !== s) return;
+      await (s.view as MapView).goTo(dim === "3d" ? ({ target: site, tilt: 58 } as never) : site, { duration: 900 });
+      if (live) flown.current = plan;
+    }).catch((e) => { if (live && e?.name !== "AbortError") { console.error("[plan layers]", e); setRoadError("Төлөвлөгөөг газрын зурагт харуулж чадсангүй. Дахин нээнэ үү."); } });
     return () => { live = false; };
-  }, [plan, dim]);
+  }, [plan, dim, roadDisplay]);
   useEffect(() => {
     for (const [k, list] of planRefs.current) for (const l of list) l.visible = planLayers[k];
     setTip(null);
   }, [planLayers]);
 
-  useEffect(() => { if (resultLayer.current) resultLayer.current.opacity = opacity; }, [opacity]);
+  useEffect(() => { if (resultGroup.current) resultGroup.current.opacity = opacity; }, [opacity]);
   useEffect(() => {
     if (resultLayer.current) resultLayer.current.visible = visible;
+    if (resultGroup.current) resultGroup.current.visible = visible;
     if (!visible) setTip(null);
   }, [visible]);
 
   return (
     <div className="mapWrap">
       <div ref={box} className="map" />
+      {plan && (roadError || roadDisplay?.plan !== plan) && <div className={`mapPlanStatus${roadError ? " error" : ""}`} role={roadError ? "alert" : "status"}>{roadError ?? "Замын дүрслэлийг бэлтгэж байна…"}</div>}
       {tip?.plan && <PlanTip info={tip.plan} x={tip.x} y={tip.y} w={box.current?.clientWidth ?? 0} h={box.current?.clientHeight ?? 0} />}
       {tip?.i != null && prep && res && <CellTip prep={prep} res={res} i={tip.i} x={tip.x} y={tip.y} w={box.current?.clientWidth ?? 0} h={box.current?.clientHeight ?? 0} />}
     </div>

@@ -134,10 +134,16 @@ export type Exclusion = {
   key: string; label: string; unit?: string; value: number | ""; flag: Flag; hint: string; toggle?: boolean;
   /** Газрын бүрхэвчийн ангиллаар хориглох бол тухайн ангилал */
   landcover?: string;
+  /** Нүд албан ёсны полигон дотор байвал хориглоно: num[key] нь 1/0 */
+  mask?: boolean;
 };
 
 // Хориглох нөхцөл — хангасан нүд шууд 1-р түвшин (Тохиромжгүй). Хоосон = идэвхгүй.
 export const EXCLUSIONS: Exclusion[] = [
+  { key: "protected", label: "Тусгай хамгаалалттай газар", value: 1, toggle: true, mask: true, flag: "ШАЛГАХ", hint: "Улсын ТХГН-ийн дөрвөн ангилал (TXG20230102). Бүсчлэлээр ялгаагүй, бүгдийг хасав. Орон нутгийн хамгаалалтад авсан газар ороогүй — ШАЛГАХ." },
+  { key: "lake", label: "Нуур", value: 1, toggle: true, mask: true, flag: "ТААМАГЛАЛ", hint: "Нуурын албан ёсны хил. Эргийн хамгаалалтын бүс ороогүй — норм ШАЛГАХ." },
+  { key: "cropland", label: "Газар тариалан", value: 1, toggle: true, mask: true, flag: "ТААМАГЛАЛ", hint: "Эзэмших, ашиглах эрхтэй тариалангийн нэгж талбар. Барилгажуулахгүй гэж үзэв." },
+  { key: "river", label: "Голоос <", unit: "м", value: 500, flag: "ТААМАГЛАЛ", hint: "Төлөвлөгчийн анхдагч зайтай ижил — усны хамгаалалтын бүсийн нормоор ШАЛГАХ." },
   { key: "slope", label: "Налуу >", unit: "%", value: 25, flag: "ТААМАГЛАЛ", hint: "25%-иас их налууд барилгажилт, зам хэт өртөгтэй." },
   { key: "flow", label: "Урсацын хуримтлал >", unit: "га", value: 500, flag: "ТААМАГЛАЛ", hint: "Сайр, гуу жалгын гол шугам — үерийн эрсдэл." },
   { key: "tl", label: "Цахилгааны шугамаас <", unit: "м", value: 40, flag: "ШАЛГАХ", hint: "220 кВ шугамын хамгаалалтын зурвасын өргөн — норм ШАЛГАХ." },
@@ -153,7 +159,7 @@ export const EXCLUSIONS: Exclusion[] = [
  *  Жалганы хориг нь 1 м DSM шаарддаг тул хасагдсан; ус, намаг, цасны хориг нэмэгдсэн. */
 export const surfaceOnly = () => ({
   factors: FACTORS.map((f) => (f.group === "dem" ? f : { ...f, weight: 0 })),
-  excl: EXCLUSIONS.filter((e) => e.key === "slope" || e.key === "flow" || e.key === "water" || e.key === "wetland" || e.key === "snow"),
+  excl: EXCLUSIONS.filter((e) => e.mask || e.key === "slope" || e.key === "flow" || e.key === "water" || e.key === "wetland" || e.key === "snow"),
   method: "fixed" as ClassMethod,
 });
 
@@ -201,6 +207,7 @@ export type Prepared = {
   x: ArrayLike<number>; y: ArrayLike<number>; // нүдний төв, UTM
   areaHa: number; // полигоны яг талбай
   centroid: [number, number]; // lon, lat
+  boundaryLonLat?: [number, number][][]; // шинжилгээнд ашигласан яг хил; газрын зургийн таслалт
   zone: ArrayLike<number>; zones: ZoneInfo[]; // сум; -1 = Монголын хилийн гадна
   num: Record<string, ArrayLike<number>>; // slope, aspect, elev(%), elevM, tpi, flow, зай; NaN = мэдээлэлгүй
   cat: Record<string, { dict: string[]; idx: ArrayLike<number> }>; // idx -1 = хамраагүй
@@ -208,6 +215,7 @@ export type Prepared = {
   warnings: string[];
   roads?: [number, number][][]; // полигоны орчмын хучилттай зам, UTM — төлөвлөгчийн орох цэгт
   rivers?: [number, number][][]; // полигоны орчмын гол мөрөн, UTM — төлөвлөлтөд зай авна
+  noBuild?: [number, number][][][]; // ТХГН, нуур, газар тариалангийн яг хил, UTM — зөвхөн төлөвлөж болох хэмжээний полигонд
   anchor?: { name: string; x: number; y: number; km: number } | null; // хамгийн ойрын сум, аймгийн төв
 };
 
@@ -252,6 +260,7 @@ export function factorScore(f: Factor, p: Prepared, i: number): number | null {
 
 function excludedBy(e: Exclusion, p: Prepared, i: number) {
   if (e.value === "" || (e.toggle && !e.value)) return false;
+  if (e.mask) return p.num[e.key]?.[i] === 1;
   if (e.landcover) return catValue(p, "landcover", i) === e.landcover;
   const v = p.num[e.key]?.[i];
   if (v == null || !Number.isFinite(v)) return false;
@@ -270,8 +279,8 @@ export function evaluate(p: Prepared, factors: Factor[], excl: Exclusion[], meth
   const fcnt: Record<string, number> = Object.fromEntries(active.map((f) => [f.key, 0]));
   const unscored: Record<string, Set<string>> = {};
   let lo = Infinity, hi = -Infinity, coverSum = 0, noData = 0;
-  // Газрын бүрхэвчийн хоригийг түрүүлж шалгана: нуур дээр урсац хуримтлагддаг ч шалтгаан нь ус
-  const ordered = [...excl.filter((e) => e.landcover), ...excl.filter((e) => !e.landcover)];
+  // Албан ёсны хил, дараа нь газрын бүрхэвчийг түрүүлж шалгана: хамгаалалттай газрын налуу нүдний шалтгаан нь хамгаалалт, нуур дээр урсац хуримтлагддаг ч шалтгаан нь ус
+  const ordered = [...excl.filter((e) => e.mask), ...excl.filter((e) => e.landcover), ...excl.filter((e) => !e.landcover && !e.mask)];
   // 1-р алхам: нийлбэр оноо, хориг
   for (let i = 0; i < p.n; i++) {
     let score = 0, avail = 0, weak = "", loss = -1;

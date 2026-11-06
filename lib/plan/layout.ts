@@ -2,6 +2,7 @@
 // Тор биш: тэнхлэг газрын гадаргыг даган муруйна (DEM A*), блок нь супер блокийг OBB-ээр рекурсив хуваана (CityEngine subdivision).
 import { slopeAt, zAt, type Dem } from "./dem";
 import {routeTerrain,routePathMetrics} from "./terrainRoute";
+import { GER_PARCEL_AREA } from "./gerConfig";
 import {
   add, area, bbox, bufMany, bufPath, bufPoly, circle, clipPath, cut, densify, diff, dist, dot, generalizePath, inside, inter,
   labelPt, lineThrough, mul, nearest, norm, obb, orientedRect, parts, pathLength, perp, rng, smooth, sub, unionAll, type Path, type Rings, type XY,
@@ -16,6 +17,7 @@ export type Lot = { id: number; zone: ZoneCls; use: LotUse; rings: Rings; area: 
 
 // ---------- Алхам 1: хөтөлбөр ----------
 export type ProgramIn = {
+  mode?: PlanMode;
   pop: number; hhSize: number; m2pp: number; netRatio: number; floorsRes: number; bcrRes: number;
   resShare: number; pubShare: number; greenShare: number; engShare: number; farMaxRes?: number;
   comSplit: number; eduSplit: number; healthSplit: number;
@@ -23,6 +25,14 @@ export type ProgramIn = {
 export type Program = { hh: number; gfaRes: number; resNet: number; site: number; res: number; com: number; edu: number; health: number; green: number; eng: number };
 
 export function program(i: ProgramIn, scale = 1): Program {
+  if (i.mode === "ger") {
+    const hh = Math.ceil(i.pop / i.hhSize), resNet = hh * GER_PARCEL_AREA;
+    const site = resNet / (i.resShare / 100) * scale;
+    const pub = site * i.pubShare / 100, split = i.comSplit + i.eduSplit + i.healthSplit || 1;
+    return { hh, gfaRes: hh * 120, resNet, site, res: site * i.resShare / 100,
+      com: pub * i.comSplit / split, edu: pub * i.eduSplit / split, health: pub * i.healthSplit / split,
+      green: site * i.greenShare / 100, eng: site * i.engShare / 100 };
+  }
   const gfaRes = (i.pop * i.m2pp) / i.netRatio;
   // Багтаамж: давхар × BCR, гэхдээ FAR-ын нормоос хэтрэхгүй (блокийн дүрэмтэй ижил)
   const resNet = gfaRes / Math.min(i.floorsRes * (i.bcrRes / 100), i.farMaxRes ?? Infinity);
@@ -65,16 +75,18 @@ function contourDir(dem: Dem, c: XY): XY {
 }
 
 // Төлөвлөлтийн загварын горим: хэлбэр, тэнхлэгийн бүтэц нь горимоор өөрчлөгдөнө (алхмын дараалал ижил)
-export type PlanMode = "organic" | "grid" | "ring" | "linear" | "terrain";
+export type PlanMode = "organic" | "grid" | "ring" | "linear" | "terrain" | "ger";
 export const PLAN_MODES: { k: PlanMode; label: string; hint: string }[] = [
-  { k: "organic", label: "Органик", hint: "Гадаргыг даган муруйсан тэнхлэг, чөлөөт хэлбэрийн талбай" },
-  { k: "grid", label: "Сүлжээ", hint: "Тэгш өнцөгт талбай, налуугийн дагуу чиглэсэн шулуун гудамжны сүлжээ" },
+  { k: "ger", label: "Гэр хороолол", hint: "Айл бүрт 0.7 га хашаа, амины байшин, гараж, ногоон талбай" },
+  { k: "organic", label: "Газрын хэлбэр дагасан", hint: "Замыг газрын хэлбэр, налууд тохируулан байрлуулна." },
+  { k: "grid", label: "Тэгш өнцөгт гудамжтай", hint: "Шулуун гудамжнуудыг тэгш өнцгөөр огтлолцуулж төлөвлөнө." },
   { k: "ring", label: "Цагираг-радиал", hint: "Дугуй талбай, төвөөс тарсан радиал ба хоёр цагираг зам" },
-  { k: "terrain", label: "Газарт тулгуурласан (суперблок)", hint: "Хил нь гудамжны торын суперблокоор тодорхойлогдоно: эхлэх цэгээс налуугийн дагуу сунасан тэгш өнцөгтөөр тохиромжтой блокуудыг нэмнэ — тохиромжгүй газар, бүсийн хилээр огтлогдоно" },
+  { k: "terrain", label: "Тохиромжтой хэсэгт хороолол", hint: "Тохиромжтой хэсгүүдийг сонгож, тэгш өнцөгт хорооллууд үүсгэнэ." },
   { k: "linear", label: "Шугаман", hint: "Сунасан талбай, нэг нуруу тэнхлэг ба хөндлөн хавирга гудамж. Нуруу урт тул бохирын өөрийн урсгал гүнзийрч, насос станц шаардаж болзошгүй" },
 ];
 // Хэлбэр: rect = тэгш өнцөгт, e = суналтын харьцаа (налуугийн шугамын дагуу)
 const SHAPE: Record<PlanMode, { rect: boolean; e: number }> = {
+  ger: { rect: true, e: 1.3 },
   organic: { rect: false, e: 1.35 }, grid: { rect: true, e: 1.3 }, ring: { rect: false, e: 1 }, linear: { rect: false, e: 2.8 },
   terrain: { rect: true, e: 1.5 }, // pickBlocks ашиглана; энэ нь нөөц
 };
@@ -179,6 +191,14 @@ export function terrainPath(dem:Dem,mask:Uint8Array,a:XY,b:XY,costSurface?:Float
 
 /** Хилийн цэгүүдээс d чиглэлд хамгийн алсын цэг */
 function farBoundary(site: Rings, c: XY, d: XY): XY {
+  // Intersect the ray through the centre, rather than choosing an unrelated
+  // extreme corner (which turned small rectangular sites into diagonal roads).
+  const box = bbox(site), reach = Math.hypot(box.x1 - box.x0, box.y1 - box.y0) * 2 + 1;
+  const ray = clipPath([[c, add(c, mul(norm(d), reach))]], site);
+  // A hole can split this ray. Aim for the outer edge so the terrain router
+  // can go around the exclusion and serve the neighbourhood beyond it.
+  const farthest = ray.flat().sort((a, b) => dist(b, c) - dist(a, c))[0];
+  if (farthest) return farthest;
   let best = c, bv = -Infinity;
   for (const r of site) for (const p of densify(r, 15)) { const v = dot(sub(p, c), d); if (v > bv) { bv = v; best = p; } }
   return best;
@@ -189,12 +209,31 @@ export function axes(site: Rings, center: XY, entry: XY | null, dem: Dem, p: Axe
   const mask = maskOf(dem, bufPoly(site, dem.cell * 2));
   if(costSurface)for(let k=0;k<mask.length;k++)if(!Number.isFinite(costSurface[k]))mask[k]=0;
   const A = area(site), R = Math.sqrt(A / Math.PI);
-  let E = entry ?? farBoundary(site, center, [-1, 0]);
+  let E = entry ?? farBoundary(site, center, mul(obb(site).u, -1));
   const d = norm(sub(center, E));
   const X = farBoundary(site, center, d);
   const streets: Street[] = [];
   let id = 1;
-  const clipIn = (path: Path) => clipPath([path], bufPoly(site, -2)).filter((q) => pathLength(q) > 30);
+  const routes = new Map<number, { mask: Uint8Array; nodes: XY[] }>();
+  const route = (a: XY, b: XY, cls: StreetCls): Path => {
+    const width = cls === "arterial" ? p.arterialW : p.collectorW;
+    let grid = routes.get(width);
+    if (!grid) {
+      // Keep the whole corridor clear of holes and the outer boundary. The
+      // former outward buffer erased small prohibited areas before routing.
+      const safe = bufPoly(site, -width / 2 - dem.cell * 0.75);
+      const routeMask = maskOf(dem, safe), nodes: XY[] = [];
+      for (let k = 0; k < routeMask.length; k++) {
+        if (costSurface && !Number.isFinite(costSurface[k])) routeMask[k] = 0;
+        if (routeMask[k]) nodes.push([dem.x0 + k % dem.nx * dem.cell, dem.y0 + Math.floor(k / dem.nx) * dem.cell]);
+      }
+      grid = { mask: routeMask, nodes }; routes.set(width, grid);
+    }
+    if (!grid.nodes.length) return [];
+    const snap = (point: XY) => grid!.nodes.reduce((best, node) => dist(node, point) < dist(best, point) ? node : best);
+    return terrainPath(dem, grid.mask, snap(a), snap(b), costSurface, p.maxGrade?.[cls] ?? 8);
+  };
+  const clipIn = (path: Path, width: number) => path.length < 2 ? [] : clipPath([path], bufPoly(site, -width / 2 - 0.2)).filter((q) => pathLength(q) > 30);
   // Байгаа гудамжтай нэг тэнхлэгээр давхцсан эхлэл/төгсгөлийг тайрна (радиал нь магистралийн эхний хэсгийг давхар зурахгүй):
   // салаалах цэгээс эхэлнэ. Давхар зам санхүү, хөдөлгөөн, гудамжны загварт хоёр удаа тоологддог байсан.
   const onExisting = (pt: XY) => streets.some((s) => { for (let i = 1; i < s.path.length; i++) { const a = s.path[i - 1], b = s.path[i], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy; if (!l2) continue; const t = Math.max(0, Math.min(1, ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / l2)); if (Math.hypot(pt[0] - a[0] - t * dx, pt[1] - a[1] - t * dy) < 1) return true; } return false; });
@@ -207,7 +246,7 @@ export function axes(site: Rings, center: XY, entry: XY | null, dem: Dem, p: Axe
     const k0 = at(dense[i0]), k1 = at(dense[i1]);
     return [dense[i0], ...q.slice(k0 + 1, k1).filter((v) => Math.hypot(v[0] - dense[i0][0], v[1] - dense[i0][1]) > .5 && Math.hypot(v[0] - dense[i1][0], v[1] - dense[i1][1]) > .5), dense[i1]];
   };
-  const addS = (cls: StreetCls, path: Path, w: number) => { for (const q0 of clipIn(path)) {const q = trimShared(q0);if (pathLength(q) <= 30) continue;if(!Number.isFinite(routePathMetrics(dem,mask,q,{maxGrade:p.maxGrade?.[cls]??8,costSurface}).cost))continue;streets.push({ id: id++, cls, path: q, w });} };
+  const addS = (cls: StreetCls, path: Path, w: number) => { for (const q0 of clipIn(path, w)) {const q = trimShared(q0);if (pathLength(q) <= 30) continue;if(!Number.isFinite(routePathMetrics(dem,mask,q,{maxGrade:p.maxGrade?.[cls]??8,costSurface}).cost))continue;streets.push({ id: id++, cls, path: q, w });} };
   const mode: PlanMode = p.mode ?? "organic";
   const stepG = Math.max(120, p.gridStep || 240);
   const ringAt = (f: number) => {
@@ -238,11 +277,11 @@ export function axes(site: Rings, center: XY, entry: XY | null, dem: Dem, p: Axe
       if (exits.length) E = exits.sort((a, b) => dist(a, E) - dist(b, E))[0];
     } else {
       // Орох зам: одоо байгаа замаас төв хүртэл гадаргыг даган
-      addS("arterial", terrainPath(dem,mask,E,center,costSurface,p.maxGrade?.arterial??8), p.arterialW);
+      addS("arterial", route(E, center, "arterial"), p.arterialW);
     }
   } else if (mode === "linear") {
     // Шугаман: нэг нуруу тэнхлэг, түүний дагуу хөндлөн хавирга гудамж
-    const spine = [...terrainPath(dem,mask,E,center,costSurface,p.maxGrade?.arterial??8), ...terrainPath(dem,mask,center,X,costSurface,p.maxGrade?.arterial??8).slice(1)];
+    const spine = [...route(E, center, "arterial"), ...route(center, X, "arterial").slice(1)];
     addS("arterial", spine, p.arterialW);
     const L = pathLength(spine);
     const dense = densify(spine, 10);
@@ -269,13 +308,13 @@ export function axes(site: Rings, center: XY, entry: XY | null, dem: Dem, p: Axe
         return norm(add(mul(d, Math.cos(a)), mul(pd, Math.sin(a))));
       })
       : [pd, mul(pd, -1), norm(add(d, pd)), norm(sub(pd, d)), norm(sub(mul(pd, -1), d)), norm(add(mul(pd, -1), d))];
-    if (mode !== "ring") addS("arterial", [...terrainPath(dem,mask,E,center,costSurface,p.maxGrade?.arterial??8), ...terrainPath(dem,mask,center,X,costSurface,p.maxGrade?.arterial??8).slice(1)], p.arterialW);
-    else addS("arterial", terrainPath(dem,mask,E,center,costSurface,p.maxGrade?.arterial??8), p.arterialW);
+    if (mode !== "ring") addS("arterial", [...route(E, center, "arterial"), ...route(center, X, "arterial").slice(1)], p.arterialW);
+    else addS("arterial", route(E, center, "arterial"), p.arterialW);
     dirs.slice(0, nRad).forEach((dir, k) => {
       const B = farBoundary(site, center, dir);
       if (dist(B, center) < 120) return;
       const art = big && k < 2 && mode !== "ring";
-      addS(art ? "arterial" : "collector", terrainPath(dem,mask,center,B,costSurface,p.maxGrade?.[art?'arterial':'collector']??8), art ? p.arterialW : p.collectorW);
+      addS(art ? "arterial" : "collector", route(center, B, art ? "arterial" : "collector"), art ? p.arterialW : p.collectorW);
     });
     if (mode === "ring" && A > 20e4) { ringAt(0.62); ringAt(0.3); }
     else if (p.ringOn && A > 40e4) ringAt(0.42);
@@ -337,6 +376,10 @@ export type ZoningIn = { windbreak: number; sanitary: { rings: Rings; m: number 
 export type ZoneAnchors = { centers: XY[]; park: XY; eng: XY };
 
 export function zoning(site: Rings, streets: Street[], prog: Program, anchors: ZoneAnchors, p: ZoningIn) {
+  // Population iterations can request more land than the boundary contains.
+  // Keep the requested shares, rather than letting oversized park/public
+  // allocations consume every residential block once the site stops growing.
+  const capacity = Math.min(1, area(site) / Math.max(1, prog.site));
   const axisU = bufMany(streets.map((s) => ({ paths: [s.path], d: s.w / 2 })));
   let protect = windbreak(site, p.windbreak);
   for (const s of p.sanitary) protect = unionAll([protect, inter(bufPoly(s.rings, s.m), site)]);
@@ -348,17 +391,17 @@ export function zoning(site: Rings, streets: Street[], prog: Program, anchors: Z
   for (const q of parts(protect)) if (area(q) > 1500) zones.push({ id: id++, cls: "protect", rings: q, area: area(q) });
   const protectA = zones.reduce((s, z) => s + z.area, 0);
   const C = anchors.centers.length ? anchors.centers : [anchors.park];
-  const pub: [ZoneCls, number, XY][] = (["com", "edu", "health"] as const).flatMap((cls) => C.map((c) => [cls, prog[cls] / C.length, c] as [ZoneCls, number, XY]));
+  const pub: [ZoneCls, number, XY][] = (["com", "edu", "health"] as const).flatMap((cls) => C.map((c) => [cls, prog[cls] * capacity / C.length, c] as [ZoneCls, number, XY]));
   // Ногоон байгууламж: parkSpread-ийн тороор хорооллын паркууд (хүртээмж ≈ parkSpread/2) — нэг том парк зүүн/нэг талд
   // бөөгнөрч, барилгажилт нөгөө талд нягтрахаас сэргийлнэ. Цэцэрлэгт хот (parkFirst) — нэг төв цэцэрлэгт хүрээлэн.
-  const parkNeed = Math.max(0, prog.green - protectA);
+  const parkNeed = Math.max(0, prog.green * capacity - protectA);
   const sb = bbox(site), sp = p.parkSpread ?? 0;
   const grid: XY[] = [];
   if (sp > 0 && !p.parkFirst) for (let x = sb.x0 + sp / 2; x < sb.x1; x += sp) for (let y = sb.y0 + sp / 2; y < sb.y1; y += sp) if (inside(x, y, site)) grid.push([x, y]);
   const parkAnchors = grid.length > 1 && parkNeed / grid.length > 3000 ? grid : [anchors.park];
   const parks = parkAnchors.map((a): [ZoneCls, number, XY] => ["park", parkNeed / parkAnchors.length, a]);
   // Цэцэрлэгт хот: төвийн цэцэрлэгт хүрээлэнг эхэлж, үйлчилгээ түүнийг хүрээлнэ
-  const plan: [ZoneCls, number, XY][] = p.parkFirst ? [...parks, ...pub, ["eng", prog.eng, anchors.eng]] : [...pub, ...parks, ["eng", prog.eng, anchors.eng]];
+  const plan: [ZoneCls, number, XY][] = p.parkFirst ? [...parks, ...pub, ["eng", prog.eng * capacity, anchors.eng]] : [...pub, ...parks, ["eng", prog.eng * capacity, anchors.eng]];
   for (const [cls, total, anchor] of plan) {
     let need = total;
     while (need > 1500 && free.length) {
@@ -452,19 +495,28 @@ export function subdivide(zones: ZonePiece[], streets: Street[], p: SubdivIn) {
   }
   // Хорооллын парк (Pocket_Park.cga): ≤rPark зайд ≥0.5 га ногоон байхгүй орон сууцны блокийг хамруулна
   const reach = (l: Lot, c: XY) => dist(l.c, c) <= p.rPark + Math.sqrt(l.area) / 2;
-  const parkOk = (c: XY) => lots.some((l) => l.use === "park" && l.area >= 5000 && reach(l, c));
+  // Small neighbourhoods can have a pocket park. The separate norm report
+  // still checks the 0.5 ha park target; never replace their only housing block.
+  const pocketArea = Math.min(5000, Math.max(800, lots.reduce((s, l) => s + l.area, 0) * 0.08));
+  const parkOk = (c: XY) => lots.some((l) => l.use === "park" && l.area >= pocketArea * 0.9 && reach(l, c));
   let need = lots.filter((l) => l.use === "res" && !parkOk(l.c));
   while (need.length) {
     let best: Lot | null = null, bn = 0;
     for (const c of lots) {
-      if (c.use !== "res" || c.area < 5000) continue;
+      if (c.use !== "res" || c.area < pocketArea * 3) continue;
       const n = need.filter((t) => reach(c, t.c)).length;
       if (n > bn) { bn = n; best = c; }
     }
     if (!best) break;
-    best.use = "park"; best.zone = "park";
-    const b = best;
-    need = need.filter((t) => t !== b && !reach(b, t.c));
+    const b = best, o = obb(b.rings);
+    const t = takeFrom(b.rings, add(o.c, mul(o.u, o.len)), pocketArea);
+    const kp = parts(t.piece)[0];
+    if (!kp || area(t.rest) < b.area * 0.6 || obb(t.rest).wid < p.minW) break;
+    const park: Lot = { id: next++, zone: "park", use: "park", rings: kp, area: area(kp), c: labelPt(kp), edge: b.edge };
+    lots.push(park);
+    b.rings = t.rest; b.area = area(t.rest); b.c = labelPt(t.rest);
+    if (t.chord) walkCuts.push(...clipPath([t.chord], unionAll([kp, t.rest])));
+    need = need.filter((l) => !parkOk(l.c));
   }
   return { lots: lots.filter((l) => l.area > 600), local, walkCuts };
 }

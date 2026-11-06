@@ -1,21 +1,23 @@
 "use client";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import PlanPanel, { type PlanState } from "./PlanPanel";
+import StandardsPanel from "./StandardsPanel";
 import type { Region } from "./SuitabilityApp";
 import type { PlanInputs } from "@/lib/plan/runSettlement";
 import type { PlanLayerKey } from "@/lib/plan/planLayers";
 import {
-  LEVELS, fmtN, verdictOf,
-  type Factor, type Prepared, type SourceStatus, type Summary,
+  LEVELS, fmtN,
+  type Factor, type Prepared, type Summary,
 } from "@/lib/suit.ts";
 
 type BBox = [number, number, number, number];
 type SoumEntry = { aimag: string; soum: string; bbox: BBox };
-type Tab = "result" | "plan";
+type Tab = "result" | "plan" | "standard";
 
 const TABS: { key: Tab; label: string; icon: string }[] = [
   { key: "result", label: "Тохиромж", icon: "chart" },
   { key: "plan", label: "Төлөвлөлт", icon: "plan" },
+  { key: "standard", label: "Стандарт", icon: "book" },
 ];
 /** Түвшний өнгөн дээрх текстийн өнгө — улаан, бараан ногоон дээр цагаан */
 const onLevel = (n: number) => (n === 1 || n === 5 ? "#ffffff" : "#1b2430");
@@ -30,6 +32,7 @@ const ICONS: Record<string, ReactNode> = {
   chart: <path d="M4 4v16h16M8 15v-4M13 15V7M18 15V9" />,
   plan: <><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><path d="M14 14h7v7h-7z" /></>,
   arrow: <path d="M5 12h14m-5-5 5 5-5 5" />,
+  book: <path d="M12 6.5C10 5 7.5 4.5 4 4.5v14c3.5 0 6 .5 8 2 2-1.5 4.5-2 8-2v-14c-3.5 0-6 .5-8 2zM12 6.5v14" />,
 };
 function Icon({ name, size = 16 }: { name: keyof typeof ICONS; size?: number }) {
   return (
@@ -94,17 +97,6 @@ function AdminSelect({ region, onRegion }: { region: Region | null; onRegion: (r
           {list.map((s) => <option key={s.soum} value={s.soum}>{s.soum}</option>)}
         </select>
       </label>
-    </div>
-  );
-}
-
-function Stack({ areas }: { areas: number[] }) {
-  const t = areas.reduce((s, v) => s + v, 0) || 1;
-  return (
-    <div className="stack" role="img" aria-label={LEVELS.map((l) => `${l.label} ${fmtN((areas[l.n - 1] / t) * 100)}%`).join(", ")}>
-      {[...LEVELS].reverse().map((l) => areas[l.n - 1] > 0 && (
-        <i key={l.n} style={{ flexGrow: areas[l.n - 1] / t, background: l.color }} title={`${l.label}: ${fmtN(areas[l.n - 1], 1)} га`} />
-      ))}
     </div>
   );
 }
@@ -183,11 +175,9 @@ function LossBars({ res, eff }: { res: Summary; eff: Factor[] }) {
   );
 }
 
-const STATUS_LABEL: Record<SourceStatus["status"], string> = { loaded: "Бэлэн", partial: "Хэсэгчлэн", missing: "Мэдээлэлгүй" };
-
-/** Шалгуур бүр хаанаас ирж, хэр хамарсан бэ — мэдээлэлгүйг нуухгүй */
+/** Шалгуур бүр хаанаас ирж, хэр хамарсан бэ. Мэдээлэлгүй шалгуур оноонд ордоггүй тул харуулахгүй, жинг үлдсэнээр нь бодно. */
 function Sources({ prep, res, eff }: { prep: Prepared; res: Summary; eff: Factor[] }) {
-  const rows = eff.filter((f) => f.weight > 0);
+  const rows = eff.filter((f) => f.weight > 0 && prep.sources[f.key]?.status !== "missing" && res.factorCover[f.key]);
   const G = rows.reduce((s, f) => s + f.weight, 0) || 1;
   return (
     <div className="srcTable">
@@ -195,15 +185,14 @@ function Sources({ prep, res, eff }: { prep: Prepared; res: Summary; eff: Factor
       {rows.map((f) => {
         const s = prep.sources[f.key];
         const cover = res.factorCover[f.key] ?? 0;
-        const state = s?.status === "missing" || cover === 0 ? "missing" : s?.status === "partial" || cover < 0.98 ? "partial" : "loaded";
-        const unscored = res.unscored[f.key];
-        const detail = [s?.source, s?.note, unscored?.length ? `Онооны хүснэгтгүй ангилал: ${unscored.join("; ")}` : ""].filter(Boolean).join(" · ");
+        const state = s?.status === "partial" || cover < 0.98 ? "partial" : "loaded";
+        // Аргын тайлбар (s.note, res.unscored) зөвхөн хөгжүүлэгчид: хэрэглэгчид эх сурвалжийн нэр л харагдана
         return (
-          <div className="srcRow" key={f.key} title={detail}>
+          <div className="srcRow" key={f.key} title={s?.source}>
             <span>{f.label}</span>
             <span>{fmtN((f.weight / G) * 100, 0)}%</span>
             <span>{res.factorMean[f.key] == null ? "—" : fmtN(res.factorMean[f.key]! * 100)}</span>
-            <span className={`st st-${state}`}><i />{state === "partial" ? `${fmtN(cover * 100)}%` : STATUS_LABEL[state]}</span>
+            <span className={`st st-${state}`}><i />{state === "partial" ? `${fmtN(cover * 100)}%` : "Бэлэн"}</span>
           </div>
         );
       })}
@@ -214,31 +203,12 @@ function Sources({ prep, res, eff }: { prep: Prepared; res: Summary; eff: Factor
 function Result({ prep, res, eff, levels, onLevels }: {
   prep: Prepared; res: Summary; eff: Factor[]; levels: number[]; onLevels: (l: number[]) => void;
 }) {
-  const verdict = verdictOf(res.areas);
   const usable = res.areas[3] + res.areas[4];
   const total = res.areas.reduce((s, v) => s + v, 0) || 1;
   const excluded = Object.entries(res.excluded).sort((a, b) => b[1] - a[1]);
   const zones = [...res.byZone].sort((a, b) => b.total - a.total);
-  const main = zones[0];
   return (
     <div className="result">
-      {verdict && (
-        <section className="verdict" style={{ ["--lv" as string]: verdict.level.color }}>
-          <div className="verdictTop">
-            <div className="badge" style={{ background: verdict.level.color, color: onLevel(verdict.level.n) }}>{verdict.level.n}</div>
-            <div className="verdictText">
-              <span className="eyebrow">Нэгдсэн дүгнэлт</span>
-              <h2>{verdict.level.label}</h2>
-              <p>Дундаж түвшин <b>{fmtN(verdict.mean, 1)}</b> / 5</p>
-            </div>
-          </div>
-          <Stack areas={res.areas} />
-          {main && (
-            <p className="place"><Icon name="pin" size={14} /><span><b>{main.z.soum}</b> сум, {main.z.aimag} аймаг{zones.length > 1 ? ` · бас ${zones.length - 1} сум` : ""}</span></p>
-          )}
-        </section>
-      )}
-
       <dl className="kpis">
         <div><dt>Талбай</dt><dd>{fmtN(prep.areaHa, prep.areaHa < 100 ? 1 : 0)} <small>га</small></dd></div>
         <div><dt>Тохиромжтой (4–5)</dt><dd>{fmtN((usable / total) * 100)}% <small>{fmtN(usable, usable < 100 ? 1 : 0)} га</small></dd></div>
@@ -246,9 +216,8 @@ function Result({ prep, res, eff, levels, onLevels }: {
         <div><dt>Мэдээллийн хамралт</dt><dd>{fmtN(res.coverage * 100)}%</dd><u className="meter"><s style={{ width: `${res.coverage * 100}%` }} /></u></div>
       </dl>
 
-      {(res.coverage < 0.7 || prep.warnings.length > 0) && (
+      {prep.warnings.length > 0 && (
         <div className="notes">
-          {res.coverage < 0.7 && <p className="warn">Шалгуурын жингийн {fmtN((1 - res.coverage) * 100)}%-д мэдээлэл алга. Үр дүнг зөвхөн байгаа шалгуураар тооцсон.</p>}
           {prep.warnings.map((w) => <p className="warn" key={w}>{w}</p>)}
         </div>
       )}
@@ -259,7 +228,7 @@ function Result({ prep, res, eff, levels, onLevels }: {
         {levels.length < 5 && <button className="linkBtn" onClick={() => onLevels([1, 2, 3, 4, 5])}>Бүх түвшинг харуулах</button>}
       </section>
 
-      {zones.length > 1 && (
+      {zones.length > 0 && (
         <section>
           <h3>Сумаар</h3>
           <div className="rows">
@@ -297,7 +266,6 @@ function Result({ prep, res, eff, levels, onLevels }: {
       <section>
         <h3>Шалгуур ба өгөгдөл</h3>
         <Sources prep={prep} res={res} eff={eff} />
-        <p className="muted">Мөр дээр хулгана аваачихад эх сурвалж, тайлбар гарна. Нүд {prep.cell} м, UTM {prep.utmZone}N. Нүд том байх тусам нарийн гуу жалга, огцом налуу нүдний дунджид уусна: нарийвчлах бол жижиг полигон зурна уу.</p>
       </section>
     </div>
   );
@@ -308,6 +276,7 @@ export default function Panel(props: {
   showResult: boolean; onShowResult: (v: boolean) => void;
   planInputs: PlanInputs; onPlanInputs: (i: PlanInputs) => void; plan: PlanState; onRunPlan: () => void;
   planLayers: Record<PlanLayerKey, boolean>; onPlanLayers: (l: Record<PlanLayerKey, boolean>) => void;
+  savedPlans: ReactNode;
   drawing: boolean; busy: boolean; step: string | null; err: string | null; hasPolygon: boolean;
   prep: Prepared | null; res: Summary | null; eff: Factor[];
   levels: number[]; onLevels: (l: number[]) => void;
@@ -319,7 +288,7 @@ export default function Panel(props: {
   const targetLabel = hasPolygon ? "Зурсан полигон" : props.region ? (props.region.soum ? `${props.region.soum} сум, ${props.region.aimag}` : `${props.region.aimag} аймаг`) : "";
   const [tab, setTab] = useState<Tab>("result");
   const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
-  const validPlan = Number(props.planInputs.pop) > 0 && Number(props.planInputs.floorsRes) > 0 && Number(props.planInputs.maxSlope) > 0;
+  const validPlan = Number(props.planInputs.pop) > 0 && (props.planInputs.mode === "ger" || Number(props.planInputs.floorsRes) > 0) && Number(props.planInputs.maxSlope) > 0;
   const canPlan = !!prep && !busy && !drawing && !props.plan.busy && validPlan;
   // Шинэ шинжилгээ эхлэхэд үр дүнгийн таб руу шилжинэ
   useEffect(() => { if (busy || drawing) setTab("result"); }, [busy, drawing]);
@@ -372,7 +341,7 @@ export default function Panel(props: {
             <button key={t.key} ref={(el) => { tabRefs.current[t.key] = el; }} role="tab" id={`tab-${t.key}`} aria-selected={tab === t.key} aria-controls={`pane-${t.key}`}
               tabIndex={tab === t.key ? 0 : -1} className={tab === t.key ? "tabOn" : ""} onClick={() => setTab(t.key)}>
               <Icon name={t.icon} size={17} />{t.label}
-              {(t.key === "result" ? !!res : !!props.plan.result) && <span className="tabComplete" aria-label="Үр дүн бэлэн"><Icon name="check" size={11} /></span>}
+              {t.key !== "standard" && (t.key === "result" ? !!res : !!props.plan.result) && <span className="tabComplete" aria-label="Үр дүн бэлэн"><Icon name="check" size={11} /></span>}
             </button>
           ))}
         </div>
@@ -416,7 +385,8 @@ export default function Panel(props: {
             </>
           )}
 
-          {tab === "plan" && <PlanPanel hasPrep={!!prep && !busy} inputs={props.planInputs} onInputs={props.onPlanInputs} state={props.plan} layers={props.planLayers} onLayers={props.onPlanLayers} />}
+          {tab === "plan" && <PlanPanel saved={props.savedPlans} hasPrep={!!prep && !busy} inputs={props.planInputs} onInputs={props.onPlanInputs} state={props.plan} layers={props.planLayers} onLayers={props.onPlanLayers} />}
+          {tab === "standard" && <StandardsPanel result={props.plan.result} />}
 
         </div>
       </div>

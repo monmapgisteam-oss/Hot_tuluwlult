@@ -4,7 +4,10 @@
 // Норм: БНбД 30-01-24 (Selbe_db/SELBE_BNBD_NORMS.md) ба хэрэглэгчийн жишиг хүснэгт.
 import { d8, loadDem, type Dem } from "./dem";
 import {connectUrbanStreets} from "./urbanStreetConnections";
-import { add, area, bbox, bufPoly, densify, diff, dist, inside, labelPt, mul, nearest, parts, sub, type Path, type Rings, type XY, unionAll } from "./geom";
+import { add, area, bbox, bufMany, bufPoly, densify, diff, dist, inside, inter, labelPt, mul, nearest, obb, parts, sub, type Path, type Rings, type XY, unionAll } from "./geom";
+import { settlementScale } from "./settlementScale";
+import { buildGerDistrict, type GerDistrictView } from "./gerDistrict";
+import { GER_PARCEL_AREA } from "./gerConfig";
 import {
   axes, pickBlocks, pickSite, program, seedOf, steepArea, subdivide, zoning,
   type AxesIn, type Lot, type Program, type ProgramIn, type Street, type SubdivIn, type ZonePiece,
@@ -18,6 +21,8 @@ import {accessRoute,terrainSewerPaths,type Net} from './netContext';
 import {corridorGraph,sharedUtilityTree} from './sharedUtilityGraph';
 import {planningContains,planningElevation} from './planningSuitability';
 
+import { residentialFar } from "../standards.ts";
+
 export type Range = [number, number];
 export const SRC = {
   bnbd: "БНбД 30-01-24", table: "Жишиг хүснэгт", who: "ДЭМБ", sanpin: "SanPiN жишиг", ctx: "docs/project_context.md",
@@ -27,10 +32,10 @@ export const SRC = {
 export const NORM = {
   share: { road: [20, 25] as Range, green: [25, 40] as Range, res: [35, 45] as Range, pub: [8, 12] as Range },
   densityGross: [150, 300] as Range, densityNetMax: 450, farRes: 1.2, farCom: 1.2 /* ТААМАГЛАЛ: холимог блокийн дээд давхар орон сууц тул орон сууцны FAR-ыг мөрдөв — БНбД-ийн нийтийн барилгын заалтаар ШАЛГАХ */, bcrRes: 40, bcrTable: [25, 40] as Range,
-  greenBnbd: 6, greenWho: 9, greenTarget: [15, 20] as Range, parkR: 300, parkMinHa: 0.5, beds: [4, 8] as Range,
+  greenBnbd: 6 /* Х.8.2 хорооллын түвшин. ДЭМБ-ийн «9 м²»-ийн анхдагч эх сурвалж олдоогүй тул хасав */, greenTarget: [15, 20] as Range, parkR: 300, parkMinHa: 0.5, beds: [4, 8] as Range,
   // Зогсоол: БНбД-ийн орон сууцны норм + олон улсын жишиг (яг заалт бүрийг ШАЛГАХ)
   park: {
-    bnbdRes: 1.0, // зай/өрх (З.10.32) — ШАЛГАХ
+    bnbdRes: 1.0, // зай/сууц, ердийн зэрэглэл (Х.10.9); З.10.32 нь газар доорх зогсоолын заалт
     accessAda: 2, // хүртээмжтэй зайн доод хувь (ADA) — ШАЛГАХ
     evEpbd: 10, // цахилгаан тээврийн цэнэглэх зайн доод хувь (EPBD) — ШАЛГАХ
     bikePerHh: 1.0, // дугуйн зогсоол, зай/өрх — ШАЛГАХ
@@ -105,6 +110,7 @@ export type Totals = {
   walk15: number; hubDist: number; hub800: number;
 };
 export type Plan = {
+  ger?: GerDistrictView;
   notes?: string[]; // байршил сонголтын тайлбар: төв, багасгасан хүн ам
   wkid?: number; // төлөвлөгөөний UTM бүс
   suitability?:PlanningSuitabilitySummary;
@@ -134,12 +140,13 @@ export function residentialSewerNetwork(collection:Graph,loads:Float64Array,net:
   const diameter=Math.pow(q*.013*Math.pow(4,5/3)/(Math.PI*Math.sqrt(slope)),3/8)*1000,dn=[200,250,300,400,500,600,800,1000,1200,1600,2000].find(d=>d>=diameter)??null;
   return{sys:'sewer' as const,path:l.path,fromNode:l.a,toNode:l.b,sourceId:l.source,invertFrom:from,invertTo:to,flow:l.load,dn,slope,depth,warn:depth>6||dn==null};
  });
- const total=loads.reduce((a,b)=>a+b,0),unservedLoad=Math.max(0,total-tree.servedLoad),warnings=[
-  'Бохирын тусдаа трассыг бүсийн DEM-ээр цуглуулах зангилаанд хүргэв. Тухайн бүсийн өөрийн цэвэрлэх байгууламж руу коллектор/насосны холболтыг тооцно; бүс хооронд бохир дамжуулахгүй.',
-  `ТААМАГЛАЛ: оргилын коэффициент 1.3, хучаас 2.5 м, гүн ≤6 м, Manning n=0.013, доод налуу ${minSlope}; хэсэгчилсэн дүүрэлт, БНбД-ийн хурд/налууг ШАЛГАХ.`,
- ];
- if(drainage.sources.length>1)warnings.push('Бүс дотор олон цуглуулах зангилаа байна: нэгдсэн коллектор, өргөх насосыг үнэлнэ.');
- if(lifts.length)warnings.push(`${lifts.length} зангилаанд завсрын өргөлт санал болгов: өөрийн урсгалын гүн 6 м-ээс хэтэрсэн; насос, нөөц ШАЛГАХ.`);
+ const total=loads.reduce((a,b)=>a+b,0),unservedLoad=Math.max(0,total-tree.servedLoad),warnings:string[]=[];
+ // Хөгжүүлэгчийн тэмдэглэл (хэрэглэгчид харуулахгүй):
+ // - Бохирын тусдаа трассыг бүсийн DEM-ээр цуглуулах зангилаанд хүргэнэ. Бүсийн өөрийн цэвэрлэх байгууламж руу коллектор/насосны холболтыг тооцно; бүс хооронд бохир дамжуулахгүй.
+ // - ТААМАГЛАЛ: оргилын коэффициент 1.3, хучаас 2.5 м, гүн ≤6 м, Manning n=0.013, доод налуу minSlope; хэсэгчилсэн дүүрэлт, БНбД-ийн хурд/налууг ШАЛГАХ.
+ // - Бүс дотор олон цуглуулах зангилаа гарвал (drainage.sources>1) нэгдсэн коллектор, өргөх насосыг үнэлнэ.
+ // - Завсрын өргөлтийн насос, нөөцийг ШАЛГАХ.
+ if(lifts.length)warnings.push(`${lifts.length} зангилаанд завсрын өргөх насос шаардлагатай: өөрийн урсгалын гүн 6 м-ээс хэтэрсэн.`);
  return{lines,lifts,len:tree.lengthM,maxDn:lines.length?Math.max(...lines.map(l=>l.dn??0))||null:null,maxDepth:lines.length?Math.max(...lines.map(l=>l.depth)):null,srcFlow:tree.servedLoad,unservedLoad,warn:lines.filter(l=>l.warn).length+(unservedLoad>0?1:0),sources:tree.sources.map(s=>({id:s.id,point:s.point,flow:s.load,role:'collection',invertM:invert[graph.nodes.findIndex(p=>dist(p,s.point)<.001)]??null,status:'Бохир цуглуулах зангилаа · өөрийн бүсийн цэвэрлэх байгууламжийн коллектор/насос ШАЛГАХ'})),warnings};
 }
 
@@ -159,15 +166,17 @@ export async function runPlan(zone: Rings, inp: Inputs, ctx: Ctx, onStep: (s: st
   // DEM-ийн тохиромжоос гадуурх хэсэг (1–3 түвшин) — эгц налуутай хамт хасна
   const unsuit = ctx.suitable ? diff(zone, ctx.suitable) : [];
   const avoid = unionAll([steep,unsuit,...suitability.restrictions.filter(r=>!r.profiles||r.profiles.includes('building')).map(r=>r.rings)]);
-  const avail = area(diff(zone, avoid));
+  const usable = diff(zone, avoid), avail = area(usable);
+  const seedDesign = settlementScale(inp, Math.min(avail, program(inp, 1).site), obb(usable).wid);
+  const seedCore = bufPoly(usable, -seedDesign.arterialW / 2 - dem.cell * 0.75);
   const railPt: XY | null = null; // Төмөр замын цэгээр эхлэх горим хасагдсан
   const referenceSeed: XY = inp.seedMode === "point" ? [inp.seedX, inp.seedY] : seedOf(zone, inp.seedMode === "plant" ? ctx.plant : railPt);
-  const candidates:{point:XY;rank:number}[]=[],roadCost=new Float64Array(dem.z.length).fill(Infinity),rejected:Record<string,number>={},roadSuitability=buildPlanningSuitability({...suitability,boundary:ctx.suitability?.boundary??bufPoly(zone,dem.cell*2)});
+  const candidates:{point:XY;rank:number}[]=[],roadCost=new Float64Array(dem.z.length).fill(Infinity),rejected:Record<string,number>={},roadSuitability=buildPlanningSuitability({...suitability,boundary:usable});
   // Хугацаагаар (~40 мс) хөтчид чөлөө өгнө — өмнө нь 3000 нүд тутамд (~1.3 с гацалт)
   let slice=performance.now();
   for(let k=0;k<dem.z.length;k++){if(k%100===0&&performance.now()-slice>40){await pause(`Эхлэх цэг: ${Math.round((k/dem.z.length)*100)}%…`);slice=performance.now();}const point:XY=[dem.x0+k%dem.nx*dem.cell,dem.y0+Math.floor(k/dem.nx)*dem.cell];roadCost[k]=evaluatePlanningPoint(roadSuitability,point,'road').cost;if(!inside(...point,zone))continue;
    const value=evaluatePlanningPoint(suitability,point,'building',{maxSlope:inp.maxSlope});
-   if(value.allowed&&!planningContains(avoid,...point))candidates.push({point,rank:value.cost+dist(point,referenceSeed)/3000});else for(const reason of value.reasons)rejected[reason]=(rejected[reason]??0)+1;
+   if(value.allowed&&!planningContains(avoid,...point)&&(!seedCore.length||planningContains(seedCore,...point)))candidates.push({point,rank:value.cost+dist(point,referenceSeed)/3000});else for(const reason of value.reasons)rejected[reason]=(rejected[reason]??0)+1;
   }
   candidates.sort((a,b)=>a.rank-b.rank);if(!candidates.length)throw new Error('Суурьшлын тохиромжийн хатуу шалгалт хангасан талбай алга.');
   const seed=candidates[0].point;
@@ -180,12 +189,24 @@ export async function runPlan(zone: Rings, inp: Inputs, ctx: Ctx, onStep: (s: st
 
   // Тогтмол талбай: хүн амыг талбайн багтаамжаар (program() нь хүн амд шугаман) тогтоож нэг давталтаар төлөвлөнө
   const fixedHa = typeof inp.siteHa === "number" && inp.siteHa > 0 ? inp.siteHa : 0;
-  if (fixedHa) inp = { ...inp, pop: Math.max(100, Math.round((inp.pop * Math.min(fixedHa * 1e4, avail)) / program(inp, 1).site / 100) * 100) };
+  if (fixedHa && inp.mode !== "ger") inp = { ...inp, pop: Math.max(100, Math.round((inp.pop * Math.min(fixedHa * 1e4, avail)) / program(inp, 1).site / 100) * 100) };
   type Base = Omit<Plan, "t" | "nets" | "heatMain" | "ibah" | "bldgs" | "land">;
   let scale = 1, iters = 0;
   let r: Base;
   const tried: { scale: number; pop: number; r: Base }[] = [];
-  for (; iters < 5; iters++) {
+  if (inp.mode === "ger") {
+    await pause("Гэр хороолол: 0.7 га хашаа, гудамж, амины байшин…");
+    const prog = program(inp), need = Math.min(avail, fixedHa ? fixedHa * 1e4 : prog.site);
+    const site = pickSite(zone, avoid, seed, need, dem, "ger"), center = labelPt(site);
+    const design: Inputs = { ...inp, arterialW: 10, collectorW: 12, localW: 12, artLanes: 1, colLanes: 1,
+      serviceW: 0, walkW: 1.5, bikeW: 0, windbreak: 0, comGround: false, parkBays: 0, underLv: 0, underShare: 0 };
+    const district = await buildGerDistrict(site, dem, design, roadSuitability);
+    inp = design;
+    r = { inp: design, dem, zone, site, siteArea: area(site), steep, unsuit, center, entry: null, road,
+      prog, ...district, hubs: [center], iters: 1 };
+    tried.push({ scale: 1, pop: district.ger.parcels.length * inp.hhSize, r });
+  }
+  for (; inp.mode !== "ger" && iters < 5; iters++) {
     await new Promise((ok) => setTimeout(ok, 0));
     onStep(`Давталт ${iters + 1}: талбай → тэнхлэг → бүсчлэл → блок → барилга…`);
     const prog = program(inp, scale);
@@ -204,9 +225,10 @@ export async function runPlan(zone: Rings, inp: Inputs, ctx: Ctx, onStep: (s: st
       }
     }
     const center = inside(seed[0], seed[1], main) ? seed : labelPt(main);
+    const design = settlementScale(inp, area(main), obb(main).wid);
     const entry = road ? nearest(main, road) : null;
     await pause(`Давталт ${iters + 1}: гол, туслах тэнхлэг…`);
-    const ax = axes(main, center, entry, dem, inp,roadCost);
+    const ax = axes(main, center, entry, dem, design,roadCost);
     const hubs: XY[] = [center];
     if (satSite.length) {
       const sc = labelPt(satSite);
@@ -235,10 +257,20 @@ export async function runPlan(zone: Rings, inp: Inputs, ctx: Ctx, onStep: (s: st
     }
     if (inp.parkCenter) parkA = center;
     await pause(`Давталт ${iters + 1}: бүсчлэл, блок хуваалт…`);
-    const zn = zoning(site, ax.streets, prog, { centers: hubs, park: parkA, eng: engA }, { windbreak: inp.windbreak, sanitary: ctx.sanitary, localW: inp.localW, parkFirst: inp.parkCenter, parkSpread: inp.rPark * 2 });
-    const sd = subdivide(zn.zones, ax.streets, inp);
+    // Reserve land only for roads that actually survive terrain and boundary
+    // checks; otherwise removed axes leave empty corridors and isolated lots.
+    ax.streets = connectUrbanStreets(ax.streets, site, dem, design.localW, { suitability: roadSuitability, maxGrade: design.maxGrade });
+    const zn = zoning(site, ax.streets, prog, { centers: hubs, park: parkA, eng: engA }, { windbreak: design.windbreak, sanitary: ctx.sanitary, localW: design.localW, parkFirst: inp.parkCenter, parkSpread: inp.rPark * 2 });
+    const sd = subdivide(zn.zones, ax.streets, design);
     await pause(`Давталт ${iters + 1}: гудамжны сүлжээ холбож байна…`);
-    const streets: Street[] = connectUrbanStreets([...ax.streets, ...zn.chordStreets, ...sd.local],zone,dem,inp.localW,{suitability:roadSuitability,maxGrade:inp.maxGrade});
+    const streets: Street[] = connectUrbanStreets([...ax.streets, ...zn.chordStreets, ...sd.local],site,dem,design.localW,{suitability:roadSuitability,maxGrade:design.maxGrade});
+    const corridor = bufMany(streets.map((s) => ({ paths: [s.path], d: s.w / 2 })));
+    const frontage = bufPoly(corridor, 2);
+    let lotId = 0;
+    sd.lots = sd.lots.flatMap((lot) => parts(diff(lot.rings, corridor)).filter((rings) => area(rings) > 600).map((rings) => {
+      const served = lot.use === "park" || lot.use === "protect" || area(inter(rings, frontage)) > 0.1;
+      return { ...lot, id: ++lotId, rings, area: area(rings), c: labelPt(rings), ...(served ? {} : { use: "park" as const, zone: "park" as const }) };
+    }));
     // terrain горимд axes() орох цэгийг торын гол тэнхлэг рүү шилжүүлдэг (ax.E)
     const gate = inp.mode === "terrain" ? ax.E : entry;
     if (road && gate && dist(road, gate) > 20&&ctx.network){const path=accessRoute(road,gate,ctx.network,[],ctx.network.boundary,inp.arterialW/2,inp.maxGrade.arterial);if(path.length)streets.push({ id: 9999, cls: "arterial", path, w: inp.arterialW, ext: true });}
@@ -246,9 +278,12 @@ export async function runPlan(zone: Rings, inp: Inputs, ctx: Ctx, onStep: (s: st
     const graph = buildGraph(streets.filter((s) => !s.ext), dem,suitability);
     if(!graph.nodes.length||!graph.edges.length)throw new Error('Сонгосон талбайд хил, хориг, налуугийн шалгалт хангасан гудамжны сүлжээ олдсонгүй. Байршил эсвэл төлөвлөх хувилбараа өөрчилнө үү.');
     await pause(`Давталт ${iters + 1}: барилга, хашаа, зогсоол, мод…`);
-    const scene = await generateAsync(sd.lots, streets, graph, site, { ...inp, hubs, hubR: Math.sqrt(area(site) / Math.PI), bcrMaxRes: NORM.bcrRes, bcrMinRes: NORM.bcrTable[0], farMaxRes: NORM.farRes, farMaxCom: NORM.farCom,acceptFootprint:r=>evaluatePlanningFootprint(suitability,r,{maxSlope:inp.maxSlope}).allowed }, sd.walkCuts);
+    const scene = await generateAsync(sd.lots, streets, graph, site, { ...design, hubs, hubR: Math.sqrt(area(site) / Math.PI), bcrMaxRes: NORM.bcrRes, bcrMinRes: NORM.bcrTable[0], farMaxRes: NORM.farRes, farMaxCom: NORM.farCom,acceptFootprint:r=>evaluatePlanningFootprint(suitability,r,{maxSlope:inp.maxSlope}).allowed }, sd.walkCuts);
     const siteArea = area(site);
-    r = { inp, dem, zone, site, siteArea, steep, unsuit, center, entry, road, prog, streets, zones: zn.zones, lots: sd.lots, graph, scene, hubs, iters: iters + 1 };
+    // Report the final land uses after subdivision, road trimming and park
+    // allocation; the initial zoning still contains the old lot boundaries.
+    const zones: ZonePiece[] = sd.lots.map((lot) => ({ id: lot.id, cls: lot.zone, rings: lot.rings, area: lot.area }));
+    r = { inp: design, dem, zone, site, siteArea, steep, unsuit, center, entry, road, prog, streets, zones, lots: sd.lots, graph, scene, hubs, iters: iters + 1 };
     const pop = sum(scene.bldgs, (b) => (b.gfaRes * inp.netRatio) / inp.m2pp);
     const ratio = inp.pop / Math.max(1, pop);
     tried.push({ scale, pop, r });
@@ -262,12 +297,14 @@ export async function runPlan(zone: Rings, inp: Inputs, ctx: Ctx, onStep: (s: st
   }
   const best = tried.reduce((m, q) => (Math.abs(q.pop - inp.pop) < Math.abs(m.pop - inp.pop) ? q : m), tried[0]);
   const R = best.r;
+  if (!R.scene.bldgs.some((b) => b.gfaRes > 0)) throw new Error("Энэ талбайд замтай холбогдсон орон сууц байрлуулах зай хүрэлцсэнгүй. Талбайн хэлбэр эсвэл хэмжээг өөрчилнө үү.");
   onStep("Хүн ам, ажлын байр, хэрэгцээ…");
 
   // ---------- Алхам 5: барилга бүрийн хүн ам, ажлын байр, хэрэглээ ----------
   const m2Job = (b: BldgF) => (b.kind === "office" ? inp.m2JobOffice : b.kind === "school" || b.kind === "kinder" ? inp.m2JobSchool : b.kind === "clinic" ? inp.m2JobClinic : b.kind === "eng" ? 0 : inp.m2JobCom);
   const bldgs: Bldg[] = R.scene.bldgs.map((b) => {
-    const pop = (b.gfaRes * inp.netRatio) / inp.m2pp, hh = pop / inp.hhSize, waterM3 = (pop * inp.water) / 1000;
+    const hh = b.households ?? (b.gfaRes * inp.netRatio) / inp.m2pp / inp.hhSize;
+    const pop = hh * inp.hhSize, waterM3 = (pop * inp.water) / 1000;
     const nonRes = b.gfa - b.gfaRes - b.gfaCom;
     const jobs = b.gfaCom / inp.m2JobCom + (nonRes > 0 && m2Job(b) ? nonRes / m2Job(b) : 0);
     return {
@@ -278,7 +315,7 @@ export async function runPlan(zone: Rings, inp: Inputs, ctx: Ctx, onStep: (s: st
   });
   const land = Object.fromEntries(Object.keys(ZONE).map((k) => [k, 0])) as Record<ZoneKey, number> & { road: number };
   for (const z of R.zones) land[z.cls] += z.area;
-  land.road = Math.max(0, R.siteArea - sum(R.zones, (z) => z.area));
+  land.road = area(inter(bufMany(R.streets.filter((s) => !s.ext).map((s) => ({ paths: [s.path], d: s.w / 2 }))), R.site));
   const pop = sum(bldgs, (b) => b.pop), hh = sum(bldgs, (b) => b.hh);
   const resLotA = sum(R.lots.filter((l) => l.use === "res"), (l) => l.area);
   const resBl = bldgs.filter((b) => b.use === "res");
@@ -352,7 +389,7 @@ export async function runPlan(zone: Rings, inp: Inputs, ctx: Ctx, onStep: (s: st
     const need = res + vis + com + pub;
     // Ил зогсоолын багтаамж = зурсан зогсоолын гадаргуу / нэг зайн талбай (зураасны тоо нь зөвхөн чимэглэл)
     const surfaceM2 = rep["g.parking"] ?? 0;
-    const stalls = Math.floor(surfaceM2 / Math.max(5, inp.stallM2));
+    const stalls = R.ger ? R.ger.parcels.length : Math.floor(surfaceM2 / Math.max(5, inp.stallM2));
     // Далд зогсоол: орон сууцны суурийн талбайн underShare хувь, underLv давхарт
     const stallsUnder = Math.floor((resFoot * (inp.underShare / 100) * inp.underLv) / Math.max(5, inp.stallUnderM2));
     const supply = stalls + stallsUnder;
@@ -396,6 +433,12 @@ const n0 = (v: number, d = 0) => v.toLocaleString("en-US", { maximumFractionDigi
 
 export function checks(pl: Plan): Check[] {
   const t = pl.t, p = pl.inp, S = pl.siteArea;
+  if (pl.ger) return [
+    { step: 1, label: "Хүн ам (зорилт)", value: `${n0(t.pop)} / ${n0(p.pop)}`, norm: "Бодит хашааны багтаамж", src: "Хөтөлбөр", ok: t.pop >= p.pop * 0.95 },
+    { step: 4, label: "Нэг хашааны талбай", value: "0.7 га · 7,000 м²", norm: "7,000 м²", src: "Хэрэглэгчийн тохиргоо", ok: pl.ger.parcels.every(l => Math.abs(l.area - GER_PARCEL_AREA) < 1) },
+    { step: 5, label: "Айлын хашаа / өрх", value: `${pl.ger.parcels.length} / ${n0(t.hh)}`, norm: "Нэг хашаанд нэг өрх", src: "Хөтөлбөр", ok: Math.abs(t.hh - pl.ger.parcels.length) < 0.001 },
+    { step: 9, label: "Налуу хэтэрсэн гудамжны хэсэг", value: String(pl.ibah.grade.over), norm: `${p.maxGrade.arterial}/${p.maxGrade.collector}/${p.maxGrade.local}%`, src: "Төлөвлөлтийн тохиргоо", ok: pl.ibah.grade.over === 0 },
+  ];
   const pct = (v: number) => (v / S) * 100;
   const pub = pl.land.com + pl.land.edu + pl.land.health, green = pl.land.park + pl.land.protect;
   return [
@@ -409,16 +452,16 @@ export function checks(pl: Plan): Check[] {
     { step: 3, label: "Ногоон бүс", value: `${n0(pct(green), 1)}%`, norm: "25–40%", src: SRC.table, ok: inR(pct(green), NORM.share.green) },
     { step: 4, label: "Зам, гудамж", value: `${n0(pct(pl.land.road), 1)}%`, norm: "20–25%", src: SRC.table, ok: inR(pct(pl.land.road), NORM.share.road) },
     { step: 5, label: "BCR (орон сууцны блок)", value: `${n0(t.bcrRes * 100, 1)}%`, norm: "25–40% · ≤40 (Х.6.1)", src: `${SRC.table} · ${SRC.bnbd}`, ok: inR(t.bcrRes * 100, NORM.bcrTable) },
-    { step: 5, label: "FAR (орон сууцны блок)", value: n0(t.farRes, 2), norm: "≤1.2 (Х.6.1)", src: SRC.bnbd, ok: t.farRes <= NORM.farRes },
+    { step: 5, label: "FAR (орон сууцны блок)", value: n0(t.farRes, 2), norm: `≤${residentialFar(p.floorsRes)} (Х.6.1)`, src: SRC.bnbd, ok: t.farRes <= residentialFar(p.floorsRes) },
     { step: 5, label: "Нягтшил (орон сууцны блок)", value: `${n0(t.densNet)} хүн/га`, norm: "≤450 (З.6.9)", src: SRC.bnbd, ok: t.densNet <= NORM.densityNetMax },
-    { step: 7, label: "Зогсоол, орон сууц (ил + далд)", value: `${n0(t.stalls + t.stallsUnder)} / ${n0(t.parkNeedRes)}`, norm: `${NORM.park.bnbdRes}/өрх (З.10.32 — ШАЛГАХ)`, src: SRC.bnbd, ok: t.parkSupply >= t.parkNeedRes },
+    { step: 7, label: "Зогсоол, орон сууц (ил + далд)", value: `${n0(t.stalls + t.stallsUnder)} / ${n0(t.parkNeedRes)}`, norm: `${NORM.park.bnbdRes}/сууц (Х.10.9)`, src: SRC.bnbd, ok: t.parkSupply >= t.parkNeedRes },
     { step: 7, label: "Зогсоол, нийт эрэлт (зочин, үйлчилгээ орсон)", value: `${n0(t.parkSupply)} / ${n0(t.parkingNeed)}`, norm: `зочин ${p.parkVisitor}%, үйлчилгээ ${p.parkCom}/100 м² (ШАЛГАХ)`, src: `${SRC.ite} · ТААМАГЛАЛ`, ok: t.parkSupply >= t.parkingNeed },
     { step: 7, label: "Зогсоол нэг өрхөд", value: `${n0(t.parkPerHh, 2)} зай/өрх`, norm: `нийтийн тээврийн 500 м дотор ≤${NORM.park.todMax} (ТААМАГЛАЛ)`, src: SRC.tod, ok: t.transitCover < 90 ? null : t.parkPerHh <= NORM.park.todMax },
     { step: 7, label: "Ил зогсоолын талбай", value: `${n0(t.parkSurfaceHa, 2)} га (${n0(t.parkSurfacePct, 1)}%)`, norm: `≤${NORM.park.surfaceMaxPct}% (ТААМАГЛАЛ)`, src: "ТААМАГЛАЛ", ok: t.parkSurfacePct <= NORM.park.surfaceMaxPct },
     { step: 7, label: "Хүртээмжтэй зогсоол", value: `${n0(t.parkAccess)} зай · ${n0(p.accessShare, 1)}%`, norm: `≥${NORM.park.accessAda}% (ШАЛГАХ)`, src: SRC.ada, ok: p.accessShare >= NORM.park.accessAda },
     { step: 7, label: "Цахилгаан тээврийн цэнэглэх зай", value: `${n0(t.parkEv)} зай · ${n0(p.evShare, 1)}%`, norm: `≥${NORM.park.evEpbd}% (ШАЛГАХ)`, src: SRC.epbd, ok: p.evShare >= NORM.park.evEpbd },
     { step: 7, label: "Дугуйн зогсоол", value: `${n0(t.parkBike)} зай · ${n0(p.bikePark, 2)}/өрх`, norm: `≥${NORM.park.bikePerHh}/өрх (ШАЛГАХ)`, src: SRC.epbd, ok: p.bikePark >= NORM.park.bikePerHh },
-    { step: 6, label: "Нийтийн ногоон / хүн", value: `${n0(t.greenPP, 1)} м²`, norm: "≥6 (Х.8.2) · ≥9 · 15–20", src: `${SRC.bnbd} · ${SRC.who}`, ok: t.greenPP >= NORM.greenWho },
+    { step: 6, label: "Нийтийн ногоон / хүн", value: `${n0(t.greenPP, 1)} м²`, norm: "≥6 (Х.8.2)", src: SRC.bnbd, ok: t.greenPP >= NORM.greenBnbd },
     { step: 6, label: "Парк ≤300 м (≥0.5 га)", value: `${n0(t.parkCover)}%`, norm: "100%", src: SRC.table, ok: t.parkCover >= 99 },
     { step: 6, label: `Цэцэрлэг ≤${p.rKinder} м`, value: `${n0(t.kinderCover)}%`, norm: "100%", src: SRC.table, ok: t.kinderCover >= 99 },
     { step: 7, label: "Нийтийн тээвэр ≤500 м", value: `${n0(t.transitCover)}%`, norm: "100% (З.10.22)", src: SRC.bnbd, ok: t.transitCover >= 99 },

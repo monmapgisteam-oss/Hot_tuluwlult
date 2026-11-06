@@ -4,6 +4,7 @@ import { evaluate, surfaceOnly, type Prepared } from "../suit";
 import { area, bufPath, bufPoly, diff, inter, labelPt, parts, setPlanWkid, unionAll, type Path, type Rings, type XY } from "./geom";
 import { program } from "./layout";
 import { DEFAULT, runPlan, type Inputs, type Plan } from "./urban";
+import { GER_HOUSEHOLD_SIZE, GER_PARCEL_AREA } from "./gerConfig";
 
 export const MAX_PLAN_KM2 = 500;
 /** ТААМАГЛАЛ: тохиромжгүй хэсгийн хамгийн бага зураглалын нэгж (хоригоос бусад) — эх кодтой ижил */
@@ -45,7 +46,7 @@ const DRAINAGE_SETBACK_M = 200;
 const MIN_SITE_HA = 2;
 
 /** Уул, ой, гол, усны ойролцоохыг хасаж, гадаргын хэлбэрээр тохиромжтой (4–5 түвшин) талбайг гаргана */
-function suitableArea(p: Prepared, zone: Rings, riverM: number) {
+export function suitableArea(p: Prepared, zone: Rings, riverM: number) {
   const { factors, excl, method } = surfaceOnly();
   const res = evaluate(p, factors, excl, method);
   const all = cellRects(p, (i) => res.cells[i].level > 0);
@@ -62,10 +63,14 @@ function suitableArea(p: Prepared, zone: Rings, riverM: number) {
   const big = cellRects(p, (i) => p.num.flow?.[i] > RIVER_FLOW_HA);
   if (big.length) low.push(bufPoly(unionAll(big), DRAINAGE_SETBACK_M));
   if (riverM > 0 && p.rivers?.length) low.push(bufPath(p.rivers as Path[], riverM));
+  // ТХГН, нуур, газар тариалан: нүдээр биш яг хилээр нь хасна — нүднээс жижиг талбар ч үлдэхгүй
+  if (p.noBuild?.length) low.push(...(p.noBuild as Rings[]));
   const lowU = unionAll(low);
   const bad = lowU.length ? unionAll([inter(lowU, zone), inter(diff(zone, unionAll(all)), bufPoly(lowU, p.cell * 0.75))]) : [];
   const raw = diff(zone, bad);
-  return !bad.length ? zone : raw.length ? inter(bufPoly(bufPoly(raw, p.cell * 0.3), -p.cell * 0.3), zone) : [];
+  const smooth = !bad.length ? zone : raw.length ? inter(bufPoly(bufPoly(raw, p.cell * 0.3), -p.cell * 0.3), zone) : [];
+  // Тэгшлэлт нүднээс жижиг нүхийг бөглөдөг тул албан ёсны хилийг дахин хасна
+  return p.noBuild?.length ? diff(smooth, unionAll(p.noBuild as Rings[])) : smooth;
 }
 
 export async function planSettlement(o: { rings: XY[][]; prep: Prepared; inputs: PlanInputs; onStep: (s: string) => void }): Promise<Plan> {
@@ -87,7 +92,10 @@ export async function planSettlement(o: { rings: XY[][]; prep: Prepared; inputs:
   // Урт нарийн полигонд хүрээ нь том тул /api/dem-ийн 1 сая цэгийн хязгаарт багтаана
   const demCell = Math.max(DEFAULT.demCell, Math.ceil(Math.sqrt((prep.areaHa * 1e4) / 80000) / 10) * 10, Math.ceil(Math.sqrt(boxM2 / 900000) / 10) * 10);
   let inp: Inputs = { ...DEFAULT, ...inputs, demCell };
+  if (inp.mode === "ger") inp = { ...inp, hhSize: GER_HOUSEHOLD_SIZE, resShare: 70, pubShare: 10, greenShare: 18, engShare: 2 };
   const notes: string[] = [];
+  const gaps = surfaceOnly().excl.filter((e) => e.mask && !prep.num[e.key]).map((e) => e.label);
+  if (gaps.length) notes.push(`${gaps.join(", ")}: давхарга татагдсангүй, энэ төлөвлөгөөнөөс хасагдаагүй. Дахин төлөвлөнө үү.`);
   const anchor: XY | null = prep.anchor ? [prep.anchor.x, prep.anchor.y] : null;
   if (prep.anchor) {
     notes.push(`Хамгийн ойрын төв: ${prep.anchor.name} (${prep.anchor.km} км). Төлөвлөлтийг түүн рүү чиглүүлэв.`);
@@ -102,11 +110,21 @@ export async function planSettlement(o: { rings: XY[][]; prep: Prepared; inputs:
   if (!fit) {
     // Тохиромжтой талбай бага: хүн амыг багтах хэмжээнд багасгаж жижиг суурин төлөвлөнө
     const share = (chosen.a * 0.9) / need;
-    const pop = Math.max(100, Math.floor((inp.pop * share) / 100) * 100);
+    const pop = inp.mode === "ger"
+      ? Math.max(1, Math.floor(inp.pop * share / inp.hhSize)) * inp.hhSize
+      : Math.max(100, Math.floor((inp.pop * share) / 100) * 100);
     notes.push(`Тохиромжтой талбай бага (${Math.round(chosen.a / 1e4)} га) тул хүн амыг ${inp.pop.toLocaleString("en-US")}-оос ${pop.toLocaleString("en-US")} болгож багасгав.`);
     inp = { ...inp, pop, siteHa: "" };
   }
   const roads = (prep.roads ?? []) as Path[];
   const plan = await runPlan(zone, inp, { plant: anchor, sanitary: [], suitable: chosen.r, roads }, onStep);
+  if (plan.ger) notes.push(`Гэр хороолол: ${plan.ger.parcels.length} хашаа, тус бүр ${GER_PARCEL_AREA.toLocaleString("en-US")} м² (0.7 га). Нэг хашаа = нэг өрх; өрх бүрийг ${GER_HOUSEHOLD_SIZE} хүнээр тооцов.`);
+  if (!plan.ger && (plan.inp.arterialW < inp.arterialW || plan.inp.windbreak < inp.windbreak)) {
+    const fmt = (value: number) => value.toLocaleString("en-US", { maximumFractionDigits: 1 });
+    notes.push(`${fmt(plan.siteArea / 1e4)} га талбайн хэмжээнд тохируулж гол гудамжийг ${fmt(plan.inp.arterialW)} м, салхины хамгаалалтын ногоон зурвасыг ${fmt(plan.inp.windbreak)} м өргөнөөр төлөвлөв.`);
+  }
+  if (plan.t.pop < inp.pop * 0.95) {
+    notes.push(`Төлөвлөсөн барилгуудын багтаамж ${Math.round(plan.t.pop).toLocaleString("en-US")} хүн; ${inp.pop.toLocaleString("en-US")} хүний зорилтоос бага байна.`);
+  }
   return { ...plan, notes, wkid: prep.epsg };
 }

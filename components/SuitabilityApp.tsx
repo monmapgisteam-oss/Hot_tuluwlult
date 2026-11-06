@@ -3,12 +3,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import proj4 from "proj4";
 import MapPane, { type MapHandle } from "./MapPane";
 import Panel from "./Panel";
+import SavedPlans, { type LinkedItem } from "./SavedPlans";
 import type { PlanState } from "./PlanPanel";
+import type { PlanBundle, PlanItem } from "@/lib/savedPlan.ts";
 import type { PlanInputs } from "@/lib/plan/runSettlement";
 import type { PlanDim, PlanLayerKey } from "@/lib/plan/planLayers";
 import type { SessionUser } from "./LoginScreen";
 import {
-  EXCLUSIONS, FACTORS, GROUP_DEFAULT, effective, evaluate,
+  EXCLUSIONS, FACTORS, GROUP_DEFAULT, effective, evaluate, fmtN,
   type Prepared,
 } from "@/lib/suit.ts";
 
@@ -56,11 +58,12 @@ export default function SuitabilityApp({ user, onSignOut, onExpired }: { user: S
   const [planLayers, setPlanLayers] = useState(LAYERS_INITIAL);
   const [dim, setDim] = useState<PlanDim>("2d");
   const [region, setRegion] = useState<Region | null>(null);
+  const [linked, setLinked] = useState<LinkedItem | null>(null);
   const planWorker = useRef<Worker | null>(null);
   const planSeq = useRef(0);
   const showRef = useRef(showResult);
   showRef.current = showResult;
-  const stopPlan = () => { planSeq.current++; planWorker.current?.terminate(); planWorker.current = null; setPlan(PLAN_EMPTY); };
+  const stopPlan = () => { planSeq.current++; planWorker.current?.terminate(); planWorker.current = null; setPlan(PLAN_EMPTY); setLinked(null); };
 
   const res = useMemo(() => (prep ? evaluate(prep, EFFECTIVE, EXCLUSIONS, "fixed") : null), [prep]);
 
@@ -93,11 +96,11 @@ export default function SuitabilityApp({ user, onSignOut, onExpired }: { user: S
     return out;
   }, [onExpired]);
 
-  const analyze = useCallback(async (target: Target) => {
+  const analyze = useCallback(async (target: Target, keepPlan = false) => {
     abort.current?.abort();
     const ac = new AbortController();
     abort.current = ac;
-    stopPlan();
+    if (!keepPlan) stopPlan();
     setBusy(true); setErr(null); setPrep(null); setStep("Шинжилгээ эхэлж байна…"); setLevels(ALL_LEVELS);
     try {
       const p = await fetchPrepare(target, ac.signal, setStep);
@@ -109,7 +112,7 @@ export default function SuitabilityApp({ user, onSignOut, onExpired }: { user: S
     }
   }, [fetchPrepare]);
 
-  useEffect(() => () => { abort.current?.abort(); planWorker.current?.terminate(); }, []);
+  useEffect(() => () => { planSeq.current++; abort.current?.abort(); planWorker.current?.terminate(); }, []);
 
   const onPolygon = useCallback((r: [number, number][][] | null) => {
     setRings(r);
@@ -118,8 +121,9 @@ export default function SuitabilityApp({ user, onSignOut, onExpired }: { user: S
   }, [analyze]);
 
   const runPlan = async () => {
-    if (!prep) return;
+    if (!prep || plan.busy) return;
     planWorker.current?.terminate();
+    planWorker.current = null;
     const id = ++planSeq.current;
     const live = () => planSeq.current === id;
     setPlan({ busy: true, step: "Төлөвлөгчийг ачаалж байна…", err: null, result: null });
@@ -138,33 +142,68 @@ export default function SuitabilityApp({ user, onSignOut, onExpired }: { user: S
         return;
       }
     }
-    const inputRings = area, inputPrep = base;
-    const w = new Worker(new URL("../lib/plan/plan.worker.ts", import.meta.url), { type: "module", name: "settlement-plan" });
-    planWorker.current = w;
-    const finish = (next: PlanState) => { w.terminate(); if (planWorker.current === w) planWorker.current = null; setPlan(next); };
-    const fail = (message: string) => finish({ busy: false, step: null, err: message, result: null });
-    w.onmessage = (e) => {
-      const m = e.data;
-      if (m.type === "step") setPlan((v) => ({ ...v, step: m.text }));
-      else if (m.type === "error") { if (/Нэвтрэх шаардлагатай/.test(m.message)) onExpired(); else fail(m.message); }
-      else if (m.type === "done") {
-        finish({ busy: false, step: null, err: null, result: { plan: m.plan, checks: m.checks } });
-        setShowResult(false); // төлөвлөгөө тод харагдахын тулд тохиромжийн давхаргыг унтраана; чекээр дахин асаана
-        setDim("3d");
-      }
+    const inputRings = area, inputPrep = base, inputSettings = { ...planInputs };
+    let w: Worker | null = null;
+    const finish = (next: PlanState) => {
+      w?.terminate();
+      if (planWorker.current === w) planWorker.current = null;
+      if (live()) setPlan(next);
     };
-    w.onerror = (e) => fail(e.message || "Төлөвлөгч ачаалагдсангүй.");
-    w.onmessageerror = () => fail("Төлөвлөгөөний өгөгдлийг дамжуулж чадсангүй.");
-    w.postMessage({ rings: inputRings, prep: inputPrep, inputs: planInputs });
+    const fail = (message: string) => finish({ busy: false, step: null, err: message, result: null });
+    try {
+      w = new Worker(new URL("../lib/plan/plan.worker.ts", import.meta.url), { type: "module", name: "settlement-plan" });
+      planWorker.current = w;
+      w.onmessage = (e) => {
+        if (!live()) return;
+        const m = e.data;
+        if (m.type === "step") setPlan((v) => ({ ...v, step: m.text }));
+        else if (m.type === "error") { fail(m.message); if (/Нэвтрэх шаардлагатай/.test(m.message)) onExpired(); }
+        else if (m.type === "done") {
+          finish({ busy: false, step: null, err: null, result: { plan: m.plan, checks: m.checks, inputs: inputSettings } });
+          setShowResult(false); // төлөвлөгөө тод харагдахын тулд тохиромжийн давхаргыг унтраана; чекээр дахин асаана
+          setDim("3d");
+        }
+      };
+      w.onerror = (e) => { e.preventDefault(); if (live()) fail(e.message || "Төлөвлөгч ачаалагдсангүй."); };
+      w.onmessageerror = () => { if (live()) fail("Төлөвлөгөөний өгөгдлийг дамжуулж чадсангүй."); };
+      w.postMessage({ rings: inputRings, prep: inputPrep, inputs: inputSettings });
+    } catch (e) {
+      fail(e instanceof Error ? e.message : "Төлөвлөгчийг эхлүүлж чадсангүй.");
+    }
   };
 
   // 1-р алхам: полигон бэлэн бол чек асаахад үнэлгээ эхэлнэ; унтраахад давхарга л нуугдана
   const changeShowResult = (on: boolean) => {
     setShowResult(on);
     if (!on || prep || busy) return;
-    if (rings) void analyze({ rings });
-    else if (region) void analyze({ admin: region });
+    // Хадгалсан төлөвлөгөө нээлттэй бол үнэлгээ түүнийг арилгахгүй
+    const keepPlan = !!plan.result;
+    if (rings) void analyze({ rings }, keepPlan);
+    else if (region) void analyze({ admin: region }, keepPlan);
   };
+  // Порталаас нээсэн төлөвлөгөө: өмнөх талбай, үр дүнг цэвэрлээд хадгалсан байдлыг сэргээнэ. Үнэлгээг чекээр дахин тооцно.
+  const openSaved = (b: PlanBundle, item: PlanItem) => {
+    mapRef.current?.clearDraw();
+    setRegion(b.target.region);
+    if (b.target.rings) { setRings(b.target.rings); mapRef.current?.showPolygon(b.target.rings); }
+    setPlanInputs(b.inputs);
+    setPlan({ busy: false, step: null, err: null, result: { plan: b.plan, checks: b.checks, inputs: b.inputs } });
+    setLinked({ id: item.id, name: item.title, owner: item.owner });
+    setDim("3d");
+  };
+  const result = plan.result;
+  const savedPlans = (
+    <SavedPlans
+      username={user.username}
+      draft={result ? (name) => ({ name, target: { rings, region }, inputs: result.inputs ?? planInputs, plan: result.plan, checks: result.checks }) : null}
+      snippet={result ? `${fmtN(result.plan.t.pop)} хүн · ${fmtN(result.plan.bldgs.length)} барилга` : ""}
+      defaultName={`${region?.soum ?? region?.aimag ?? "Полигон"} · ${fmtN(result?.plan.t.pop ?? 0)} хүн`}
+      linked={linked} disabled={plan.busy}
+      onOpen={openSaved}
+      onSaved={(item) => setLinked({ id: item.id, name: item.title, owner: item.owner })}
+      onExpired={onExpired}
+    />
+  );
   // Шинэ аймаг, сум сонгоход зурсан полигон, үр дүн цэвэрлэгдэж чек унтарна
   const changeRegion = (r: Region | null, bbox: [number, number, number, number] | null) => {
     mapRef.current?.clearDraw();
@@ -178,6 +217,7 @@ export default function SuitabilityApp({ user, onSignOut, onExpired }: { user: S
         user={user} onSignOut={onSignOut}
         showResult={showResult} onShowResult={changeShowResult}
         planInputs={planInputs} onPlanInputs={setPlanInputs} plan={plan} onRunPlan={() => void runPlan()} planLayers={planLayers} onPlanLayers={setPlanLayers}
+        savedPlans={savedPlans}
         drawing={drawing} busy={busy} step={step} err={err} prep={prep} res={res} hasPolygon={!!rings}
         eff={EFFECTIVE}
         levels={levels} onLevels={setLevels}

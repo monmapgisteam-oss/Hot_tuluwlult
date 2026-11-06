@@ -156,5 +156,6 @@ export function network(g: Graph, sys: Sys, src: number, load: Float64Array, o: 
     len += e.len; if (dn != null) maxDn = Math.max(maxDn ?? 0, dn); if (bad) warn++;
     if (depth != null) maxDepth = Math.max(maxDepth ?? 0, depth);
   }
-  return { lines, len, maxDn, warn, srcFlow: acc[src], unservedLoad, maxDepth,...(sys==='power'&&!o.dem?{warnings:['Зөвхөн зангилааны өндрөөр шалгасан; цахилгааны трассын дотоод DEM профайл ДУТУУ ӨГӨГДӨЛ.']}: {}) };
+  // Тэмдэглэл: dem өгөгдөөгүй цахилгааны трассыг зөвхөн зангилааны өндрөөр шалгана; трассын дотоод DEM профайл ДУТУУ ӨГӨГДӨЛ.
+  return { lines, len, maxDn, warn, srcFlow: acc[src], unservedLoad, maxDepth };
 }

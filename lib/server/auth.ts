@@ -7,7 +7,7 @@ export const PORTAL_URL = (process.env.ARCGIS_PORTAL_URL?.trim() || "https://arc
 export const COOKIE = "suit_session";
 const SHARING = `${PORTAL_URL}/sharing/rest`;
 /** Token зөвхөн энэ утгатай Referer-ээс ажиллана. Порталд зөвхөн сервер хандах тул тогтмол утга хангалттай. */
-const REFERER = "https://suitability.webapp/";
+export const REFERER = "https://suitability.webapp/";
 const EXPIRATION_MIN = 480;
 const VERIFY_TTL_MS = 5 * 60 * 1000;
 const MAX_CACHE = 1000;

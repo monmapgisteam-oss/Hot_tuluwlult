@@ -35,6 +35,7 @@ export type TreeF = { x: number; y: number; t: number; h: number; r: number };
 /** Accepted parking bay, in metres; heading is clockwise from north along the vehicle's length. */
 export type ParkingSpace = { x: number; y: number; heading: number; length: number; width: number };
 export type BldgF = {
+  households?: number; // Detached housing: occupied households, independent of floor area.
   id: number; lot: number; use: LotUse; kind: MassKind; floors: number; fh: number; h: number; podium: number;
   foot: number; gfa: number; gfaRes: number; gfaCom: number; roof: MassKind; rings: Rings; c: XY;
 };
@@ -476,6 +477,52 @@ function fitBlock<T>(cand: T[], later: T[], areaOf: (c: T) => number, fMax: numb
   return best;
 }
 
+/** A small plot can accommodate one regular bar even when a perimeter courtyard cannot fit.
+ * Keep setbacks, footprint approval and density caps; reserve half the sunlight separation
+ * on each north/south plot edge and the full separation from buildings already generated. */
+function compactResidential(g: Gen, L: Lot, addBase = true) {
+  const a = g.a, inset = bufPoly(L.rings, -a.setback);
+  if (!inset.length) return false;
+  const bcrCap = Math.min(a.bcrRes, a.bcrMaxRes ?? a.bcrRes) / 100 * L.area;
+  const farCap = (a.farMaxRes ?? Infinity) * L.area;
+  const bounds = bbox(L.rings);
+  let best: { rings: Rings; floors: number; gfa: number } | null = null;
+  for (let floors = Math.floor(resFloors(a, L.c)); floors >= 2; floors--) {
+    const h = floors * a.floorH + 0.4, sun = Math.max(a.setback, a.sunK * h / 2);
+    const shifted = (dy: number): Rings => L.rings.map((ring) => ring.map(([x, y]) => [x, y + dy]));
+    let envelope = inter(inset, inter(shifted(-sun), shifted(sun)));
+    if (!envelope.length) continue;
+    const neighbors = g.s.bldgs.flatMap((b) => {
+      const gap = Math.max(a.gapEnd, a.sunK * Math.max(h, b.h)), box = bbox(b.rings);
+      return box.x1 + gap < bounds.x0 || box.x0 - gap > bounds.x1 || box.y1 + gap < bounds.y0 || box.y0 - gap > bounds.y1
+        ? [] : [bufPoly(b.rings, gap)];
+    });
+    if (neighbors.length) envelope = diff(envelope, unionAll(neighbors));
+    if (!envelope.length) continue;
+    const o = obb(envelope), cap = Math.min(bcrCap, farCap / floors);
+    for (const u of [o.u, o.v]) for (const depth of barDepths(a.depth)) {
+      const length = Math.min(a.maxLen, cap / depth);
+      if (length < 18) continue;
+      const v = perp(u), north = v[1] >= 0 ? v : mul(v, -1);
+      const preferred = add(o.c, mul(north, Math.max(0, o.wid / 2 - depth / 2)));
+      const rings = fitContainedBar(envelope, preferred, u, length, depth);
+      if (!rings.length || a.acceptFootprint && !a.acceptFootprint(rings)) continue;
+      const foot = area(rings), gfa = foot * floors;
+      if (foot > cap + 0.001 || foot < 180 - 0.001 || area(bufPoly(rings, -3)) < foot * 0.25) continue;
+      if (!best || gfa > best.gfa) best = { rings, floors, gfa };
+    }
+  }
+  if (!best) return false;
+  if (addBase) g.base("grass", L.rings);
+  const podium = a.comGround && L.edge !== "local" ? 1 : 0;
+  const b = g.building(best.rings, { use: "res", kind: "res", floors: best.floors, fh: a.floorH, podium, under: "grass" });
+  if (!b) return false;
+  g.s.lotBcr.set(L.id, b.foot / L.area);
+  g.report("bldg.compact", 1);
+  courtyard(g, diff(inset, best.rings), true, a.parkBays, best.rings);
+  return true;
+}
+
 function residential(g: Gen, L: Lot) {
   const a = g.a, floors = resFloors(a, L.c);
   g.base("grass", L.rings);
@@ -498,6 +545,7 @@ function residential(g: Gen, L: Lot) {
   // Том блокт захын цагираг BCR доод хязгаарт хүрэхгүй бол секцийн гүнийг +4 м (ТААМАГЛАЛ: ≤18 м — нийтлэг секцийн гүн, ШАЛГАХ)
   let best = fit(a.depth);
   if (best.foot < min - 1) { const deep = fit(a.depth + 4); if (deep.foot > best.foot) best = deep; }
+  if (!best.pick.length && compactResidential(g, L, false)) return;
   const B1 = best.B1;
   const podiumA = a.comGround && L.edge !== "local" ? 1 : 0;
   let foot = 0;
@@ -670,13 +718,14 @@ export function section(cls: StreetCls, W: number, a: Attrs) {
   // 18 м дотоод зам: 7 м зорчих хэсэг + тал бүрт 1 м ногоон, 2 м дугуй, 2.5 м явган зам.
   // Хуучин 10–12 м коридорыг lot руу тэлэхгүй; тусдаа дугуйн зурвас бүтэн багтвал гаргана.
   const requestedBike = cls === "local" && W < 2 * (preferredWalk + a.bikeW + a.laneW) ? 0 : a.bikeW;
-  const median = cls === "arterial" ? 4 : 0;
   let lanes = Math.max(1, Math.round(cls === "arterial" ? a.artLanes ?? 2 : cls === "collector" ? a.colLanes ?? 1 : 1)); // нэг чиглэлд
+  let median = cls === "arterial" && lanes > 1 && W >= 2 * (preferredWalk + requestedBike + 2 * a.laneW) + 4 ? 4 : 0;
   let service = cls === "arterial" ? Math.max(0, a.serviceW ?? 0) : 0, sep = service ? 3 : 0;
   const need = () => 2 * (preferredWalk + requestedBike + lanes * a.laneW + service + sep) + median;
   const MIN_VERGE = 1.5;
   if (service && W - need() < 2 * MIN_VERGE) { service = 0; sep = 0; }
   while (lanes > 1 && W < need()) lanes--;
+  if (lanes === 1) median = 0;
   const road = lanes * a.laneW + median / 2; // тэнхлэгээс үндсэн хучилтын ирмэг хүртэл
   const carriage = road + sep + service; // тэнхлэгээс туслах замын гадна ирмэг хүртэл (бүх хучилт)
   const walk = Math.min(preferredWalk, Math.max(0, W / 2 - carriage));
@@ -718,6 +767,8 @@ function streets(g: Gen, list: Street[], graph: Graph, site: Rings) {
     const offs: [number, LaneF["k"]][] = s.cls === "arterial"
       ? [...Array.from({ length: x.lanes - 1 }, (_, k) => [x.median / 2 + (k + 1) * a.laneW, "lane"] as [number, LaneF["k"]])]
       : [[0, "center"]];
+    // Compact two-way arterials have no median, so retain a centre divider.
+    if (s.cls === "arterial" && !x.median) offs.unshift([0, "center"]);
     offs.push([x.road - .2, "edge"]);
     if(x.median)offs.push([x.median/2+.2,"edge"]);
     if(x.service)offs.push([x.road + x.sep + .2, "edge"], [x.carriage - .2, "edge"]);
@@ -801,7 +852,9 @@ function* generateSteps(lots: Lot[], streetList: Street[], graph: Graph, site: R
   if (wk.length) { g.s.base.push({ rings: wk, k: "walk", lot: 0 }); g.report("g.walk", area(wk)); }
   for (const l of lots) {
     g.lot = l.id; g.rnd = rng(l.id);
-    if ((l.use === "res" || l.use === "com") && sliver(l)) pocket(g, l);
+    if ((l.use === "res" || l.use === "com") && sliver(l)) {
+      if (l.use !== "res" || !compactResidential(g, l)) pocket(g, l);
+    }
     else RULES[l.use](g, l);
     yield;
   }

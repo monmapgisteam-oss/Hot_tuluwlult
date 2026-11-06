@@ -1,0 +1,23 @@
+[
+  {
+    "name": "2.1 ha narrow site",
+    "ring": [[0, 0], [100, 0], [100, 210], [0, 210], [0, 0]],
+    "minResidentialBuildings": 1
+  },
+  {
+    "name": "5 ha narrow site",
+    "ring": [[0, 0], [140, 0], [140, 360], [0, 360], [0, 0]],
+    "minResidentialBuildings": 2
+  },
+  {
+    "name": "concave neighbourhood",
+    "ring": [[0, 0], [270, 0], [300, 120], [180, 170], [290, 330], [80, 430], [-30, 280], [0, 0]],
+    "minResidentialBuildings": 2
+  },
+  {
+    "name": "20 ha site with a prohibited area",
+    "ring": [[0, 0], [400, 0], [400, 500], [0, 500], [0, 0]],
+    "noBuild": [[[170, 215], [230, 215], [230, 285], [170, 285], [170, 215]]],
+    "minResidentialBuildings": 2
+  }
+]

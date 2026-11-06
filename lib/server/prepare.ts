@@ -1,9 +1,10 @@
 // Полигоноос тохиромжийн бэлтгэл өгөгдөл гаргана (Бөөрөлжүүтийн urbanSuit.ts prepare()-ийн дурын газрын хувилбар).
 // Оноолт нь клиентэд хийгддэг тул жин, хориг солигдоход дахин татахгүй.
 import proj4 from "proj4";
+import { GOVI_LAYER, GOVI_URL, LAKE_WHERE } from "../govi.ts";
 import { FACTORS, LANDCOVER, type Prepared, type SourceStatus, type ZoneInfo } from "../suit.ts";
 import {
-  MAX_CELLS, SegIndex, chooseCell, chooseFineCell, flowAccumulation, inPoly, medianInCell, paddingFor, reliefAt, slopeAspect, toPoly, tpiAt,
+  MAX_CELLS, SegIndex, chooseCell, chooseFineCell, flowAccumulation, inPoly, maskCells, medianInCell, paddingFor, reliefAt, slopeAspect, toPoly, tpiAt,
   type Poly, type Seg, type XY,
 } from "./grid.ts";
 import { sampleDem, sampleLandcover, type BBox } from "./rasters.ts";
@@ -19,6 +20,10 @@ const MAX_VERTICES = 5000;
 /** Дэд бүтцийн зайг хайх радиус, м — онооны муруйн төгсгөлөөс том */
 const INFRA_RADIUS = 20000;
 const CENTER_RADIUS = 80000;
+/** Голын зайг хайх радиус, м — хоригийн зайнаас том */
+const RIVER_RADIUS = 5000;
+/** Төлөвлөгч 500 км²-ээс том полигон авдаггүй (runSettlement MAX_PLAN_KM2) */
+const NO_BUILD_MAX_HA = 50000;
 const SVC_NAME = "Бөөрөлжүүт FeatureServer", OSM_NAME = "OpenStreetMap";
 
 export class InputError extends Error {}
@@ -220,6 +225,38 @@ export async function prepare(input: { rings: XY[][]; cell?: number; admin?: { a
     num[key] = round(Float64Array.from({ length: n }, (_, i) => Math.min(INFRA_RADIUS, si.nearest(x[i], y[i], INFRA_RADIUS))), 0);
   }
 
+  // ---------- ТХГН, нуур, газар тариалан, гол: улс даяарх сервис ----------
+  step("Тусгай хамгаалалттай газар, нуур, газар тариалан, гол уншиж байна…");
+  const simplify = Math.max(cell / 4, 10);
+  // Төлөвлөгч яг хилийг ашиглах тул жижиг полигонд нарийвчлалтай татна. Гол бүтнээрээ ирдэг (2.6 МБ хүрдэг) тул үргэлж хялбарчилна.
+  const planSized = areaM2 / 1e4 <= NO_BUILD_MAX_HA;
+  const polySimplify = planSized ? 2 : simplify;
+  const [govProtected, govLake, govCrop, govRiver] = await Promise.allSettled([
+    fetchFeatures(GOVI_URL, GOVI_LAYER.protected, boxInner, epsg, { fields: "objectid", simplify: polySimplify }),
+    fetchFeatures(GOVI_URL, GOVI_LAYER.lake, boxInner, epsg, { fields: "objectid", simplify: polySimplify, where: LAKE_WHERE }),
+    fetchFeatures(GOVI_URL, GOVI_LAYER.cropland, boxInner, epsg, { fields: "objectid", simplify: polySimplify }),
+    fetchFeatures(GOVI_URL, GOVI_LAYER.river, degPad(boxInner, RIVER_RADIUS), epsg, { fields: "objectid", simplify }),
+  ]);
+  const cellOf = new Int32Array(N).fill(-1);
+  inner.forEach((k, c) => { cellOf[k] = c; });
+  const noBuild: XY[][][] = [];
+  for (const [key, label, got] of [["protected", "Тусгай хамгаалалттай газрын", govProtected], ["lake", "Нуурын", govLake], ["cropland", "Газар тариалангийн", govCrop]] as const) {
+    if (got.status !== "fulfilled") {
+      warnings.push(`${label} давхарга татагдсангүй: энэ хориг ажиллаагүй. Дахин оролдоно уу.`);
+      continue;
+    }
+    const shapes = got.value.map((f) => (f.geometry.rings ?? []) as XY[][]).filter((r) => r.length);
+    num[key] = Array.from(maskCells(shapes.map(toPoly), { x0, y0, cell, nx, ny }, cellOf, n));
+    if (planSized) noBuild.push(...shapes.map((r) => r.map((ring) => ring.map((p) => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10] as XY))));
+  }
+  const svcRiverSegs = govRiver.status === "fulfilled" ? toSegs(govRiver.value) : [];
+  const riverSegs = [...svcRiverSegs, ...osmSegs("river")];
+  if (govRiver.status !== "fulfilled" && osm.status !== "fulfilled") warnings.push("Голын давхарга татагдсангүй: голоос зай авах хориг ажиллаагүй. Дахин оролдоно уу.");
+  else {
+    const ri = new SegIndex(riverSegs);
+    num.river = round(Float64Array.from({ length: n }, (_, i) => Math.min(RIVER_RADIUS, ri.nearest(x[i], y[i], RIVER_RADIUS))), 0);
+  }
+
   // Төлөвлөгчид: полигоны ойролцоох хучилттай зам (ойроос нь эхэлж хязгаарлана — цэг бүрт зай тооцдог)
   const cx = (poly.xmin + poly.xmax) / 2, cy = (poly.ymin + poly.ymax) / 2;
   const svcRoadSegs = svcRoad.status === "fulfilled" ? toSegs(svcRoad.value) : [];
@@ -228,8 +265,9 @@ export async function prepare(input: { rings: XY[][]; cell?: number; admin?: { a
     .map((s) => ({ s, d: Math.hypot(s[0] - cx, s[1] - cy) })).sort((a, b) => a.d - b.d).slice(0, 1500)
     .map(({ s }): [number, number][] => [[Math.round(s[0] * 10) / 10, Math.round(s[1] * 10) / 10], [Math.round(s[2] * 10) / 10, Math.round(s[3] * 10) / 10]]);
 
-  const nearRivers = osmSegs("river")
-    .filter((s) => s[0] > poly.xmin - 2000 && s[0] < poly.xmax + 2000 && s[1] > poly.ymin - 2000 && s[1] < poly.ymax + 2000)
+  // Хялбарчилсан шугамын хэрчим урт тул хоёр үзүүрээр нь шалгана; албан ёсны давхарга эхэндээ — хязгаарт таслагдахгүй
+  const nearRivers = riverSegs
+    .filter((s) => Math.max(s[0], s[2]) > poly.xmin - 2000 && Math.min(s[0], s[2]) < poly.xmax + 2000 && Math.max(s[1], s[3]) > poly.ymin - 2000 && Math.min(s[1], s[3]) < poly.ymax + 2000)
     .slice(0, 4000)
     .map((s): [number, number][] => [[Math.round(s[0]), Math.round(s[1])], [Math.round(s[2]), Math.round(s[3])]]);
 
@@ -294,7 +332,7 @@ export async function prepare(input: { rings: XY[][]; cell?: number; admin?: { a
   }));
 
   return {
-    cell, epsg, utmZone, n, x: round(x, 1), y: round(y, 1), areaHa: areaM2 / 1e4, centroid: [lon0, lat0],
-    zone: Array.from(zone), zones, num, cat, sources, warnings, roads: nearRoads, rivers: nearRivers, anchor,
+    cell, epsg, utmZone, n, x: round(x, 1), y: round(y, 1), areaHa: areaM2 / 1e4, centroid: [lon0, lat0], boundaryLonLat: lonLat,
+    zone: Array.from(zone), zones, num, cat, sources, warnings, roads: nearRoads, rivers: nearRivers, noBuild, anchor,
   };
 }

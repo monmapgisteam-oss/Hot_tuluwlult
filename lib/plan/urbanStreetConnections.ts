@@ -1,17 +1,17 @@
 import {corridorGraph,type CorridorGraph} from './sharedUtilityGraph';
-import {area,bufPath,diff,dist,inter,nearest,unionAll,type Rings,type XY} from './geom';
+import {area,bufPath,diff,dist,inter,nearest,pathLength,unionAll,type Rings,type XY} from './geom';
 import type {Dem} from './dem';
 import {terrainSegmentMaxGrade} from './terrainRoute';
 import type {Street,StreetCls} from './layout';
-import {planningElevation,planningRoutingCost,type PlanningSuitability} from './planningSuitability';
+import {blocksProfile,planningElevation,planningRoutingCost,type PlanningSuitability} from './planningSuitability';
 
 export type UrbanStreetOptions={suitability?:PlanningSuitability;maxGrade?:Partial<Record<StreetCls,number>>};
 /** Нөөц зурвасын бүх өргөн, нарийн вектор хориг, ангиллын налууг хамтад нь шалгана. */
 export function urbanStreetAllowed(street:Street,boundary:Rings,dem:Dem|null,options:UrbanStreetOptions={}){
- if(street.path.length<2)return false;
+ if(street.path.length<2||!Number.isFinite(street.w)||street.w<=0||street.path.some(p=>p.some(v=>!Number.isFinite(v)))||pathLength(street.path)<.001)return false;
  const surface=bufPath([street.path],street.w/2),context=options.suitability;
  if(area(diff(surface,boundary))>.01)return false;
- if(context?.restrictions.some(r=>(!r.profiles||r.profiles.includes('road'))&&area(inter(surface,r.rings))>.01))return false;
+ if(context?.restrictions.some(r=>blocksProfile(r,'road')&&area(inter(surface,r.rings))>.01))return false;
  for(let i=1;i<street.path.length;i++){
   const a=street.path[i-1],b=street.path[i],length=dist(a,b);if(length<.0001)continue;
   if(dem&&terrainSegmentMaxGrade(dem,a,b)>(options.maxGrade?.[street.cls]??8)+.00001)return false;
@@ -34,7 +34,8 @@ export function streetComponents(g:Pick<CorridorGraph,'nodes'|'edges'|'adj'>){
  * Зөвхөн өмнө нь нөөцөлсөн замын зурвас дотор богино холбоос нэмнэ:
  * барилгын газрыг дайрах, холын тусдаа хороололд зохиомол зам үүсгэхгүй. */
 export function connectUrbanStreets(input:Street[],boundary:Rings,dem:Dem|null,localWidth:number,options:UrbanStreetOptions={}){
- const streets=options.suitability||options.maxGrade?input.filter(s=>urbanStreetAllowed(s,boundary,dem,options)):[...input],internal=()=>streets.filter(s=>!s.ext),corridor=unionAll(internal().map(s=>bufPath([s.path],s.w/2+.05)));
+ // Keep the reserved source paths intact: zoning and later iterations may reuse them.
+ const streets=input.filter(s=>s.ext||urbanStreetAllowed(s,boundary,dem,options)).map(s=>({...s,path:s.path.map(p=>[...p] as XY)})),internal=()=>streets.filter(s=>!s.ext),corridor=unionAll(internal().map(s=>bufPath([s.path],s.w/2+.05)));
  const half=localWidth/2,maxGap=Math.max(localWidth,...input.map(s=>s.w))+8;
  let nextId=Math.max(10000,...input.map(s=>s.id))+1;
  for(let round=0;round<input.length;round++){
@@ -57,13 +58,29 @@ export function connectUrbanStreets(input:Street[],boundary:Rings,dem:Dem|null,l
   }
   if(!joined)break;
  }
- snapDeadEnds(streets);
- return streets;
+ snapDeadEnds(streets,s=>urbanStreetAllowed(s,boundary,dem,options)&&area(diff(bufPath([s.path],s.w/2),corridor))<=.1);
+ // A disconnected parking-loop-looking fragment is not a usable street network.
+ // Preserve the connected backbone; never invent a connector through an unreserved lot.
+ return principalStreetComponent(streets);
+}
+
+/** Prefer the arterial backbone, then collectors, then total connected length. */
+function principalStreetComponent(streets:Street[]){
+ const internal=streets.filter(s=>!s.ext),graph=corridorGraph(internal.map(s=>s.path)),{component,count}=streetComponents(graph);
+ if(count<=1)return streets;
+ const key=([x,y]:XY)=>`${Math.round(x*1000)},${Math.round(y*1000)}`;
+ const byPoint=new Map(graph.nodes.map((p,i)=>[key(p),component[i]]));
+ const groupOf=(s:Street)=>s.path.map(p=>byPoint.get(key(p))).find(c=>c!==undefined);
+ const weights=Array.from({length:count},()=>[0,0,0]);
+ for(const s of internal){const c=groupOf(s);if(c===undefined)continue;const length=pathLength(s.path);weights[c][2]+=length;if(s.cls==='arterial')weights[c][0]+=length;else if(s.cls==='collector')weights[c][1]+=length;}
+ let keep=0;
+ for(let c=1;c<count;c++)for(let k=0;k<3;k++){if(weights[c][k]===weights[keep][k])continue;if(weights[c][k]>weights[keep][k])keep=c;break;}
+ return streets.filter(s=>s.ext||groupOf(s)===keep);
 }
 
 /** Мухар төгсгөл нөгөө замын улаан шугамын ирмэг дээр (тэнхлэгээс w/2) зогсдог байсан — тэнд явган зам, ногоон
  *  зурвас үлдэж уулзвар нийлдэггүй. Төгсгөлийг нөгөө замын тэнхлэг хүртэл (≤ w/2 + 1 м) сунгаж T уулзвар үүсгэнэ. */
-export function snapDeadEnds(streets:Street[]){
+export function snapDeadEnds(streets:Street[],accept:(street:Street)=>boolean){
  const segs:{s:Street;a:XY;b:XY}[]=[];
  for(const s of streets)for(let i=1;i<s.path.length;i++)segs.push({s,a:s.path[i-1],b:s.path[i]});
  const touches=(p:XY,self:Street)=>segs.some(q=>q.s!==self&&dist(nearest([[q.a,q.b]],p,false),p)<=.05);
@@ -72,14 +89,20 @@ export function snapDeadEnds(streets:Street[]){
   for(const end of [0,1] as const){
    const p=end?s.path[s.path.length-1]:s.path[0];
    if(touches(p,s))continue;
-   let best:{q:XY;d:number}|null=null;
+   const candidates:{q:XY;d:number}[]=[];
    for(const g of segs){
     if(g.s===s)continue;
     const q=nearest([[g.a,g.b]],p,false),d=dist(q,p);
-    if(d>.05&&d<=g.s.w/2+1&&(!best||d<best.d))best={q,d};
+    if(d>.05&&d<=g.s.w/2+1)candidates.push({q,d});
    }
-   if(!best)continue;
-   if(end)s.path=[...s.path,best.q];else s.path=[best.q,...s.path];
+   candidates.sort((a,b)=>a.d-b.d);
+   for(const candidate of candidates){
+    const next={...s,path:end?[...s.path,candidate.q]:[candidate.q,...s.path]};
+    if(!accept(next))continue;
+    s.path=next.path;
+    segs.push({s,a:p,b:candidate.q});
+    break;
+   }
   }
  }
  return streets;
